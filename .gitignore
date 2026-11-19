@@ -1,0 +1,27 @@
+# local secrets / state
+.env
+var/
+*.db
+*.sqlite
+*.log
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+
+# data is mounted/copied locally, not committed
+data/*
+!data/README.md
+!data/.gitkeep
+
+# heavy artifacts (Docker images, checkpoints, model weights)
+assets/*
+!assets/README.md
+!assets/.gitignore
+
+# weights
+*.pt
+*.pth
+*.onnx
+*.engine

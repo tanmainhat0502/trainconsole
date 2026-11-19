@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Management · Train Console{% endblock %}
+{% block body %}
+<div class="wrap">
+  <div class="tc-hero">
+    <div>
+      <h1>Management</h1>
+    </div>
+    <div class="row">
+      <label class="field">Project<select id="projectSelect"></select></label>
+      <label class="field">State
+        <select id="stateFilter">
+          <option value="">All</option>
+          <option value="new">new</option>
+          <option value="in progress">in progress</option>
+          <option value="completed">completed</option>
+          <option value="rejected">rejected</option>
+        </select>
+      </label>
+      <button class="btn sm ghost" id="refreshBtn">Refresh</button>
+    </div>
+  </div>
+
+  <div class="row" style="margin-bottom:14px">
+    <button class="btn primary" id="openBatchBtn">+ New batch</button>
+    <button class="btn" id="openUsersBtn">Manage users <span class="badge" id="usersCount">—</span></button>
+  </div>
+
+  <div class="kpi" id="jobKpis"></div>
+
+  <section class="card" style="margin-top:16px">
+    <div class="table-scroll">
+      <table class="small-table">
+        <thead><tr><th>Task</th><th>Job</th><th>State</th><th>Assignee</th><th>Frames</th><th></th></tr></thead>
+        <tbody id="jobRows"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" style="margin-top:16px">
+    <div class="section-title"><h2>User progress</h2><span class="sub" id="userProgressCount">—</span></div>
+    <div id="userProgress" class="empty">No data yet.</div>
+  </section>
+</div>
+
+<div id="assigneeMenu" class="picker-menu" hidden></div>
+
+<!-- Batch modal -->
+<div class="modal" id="batchModal" hidden>
+  <div class="modal-card" style="max-width:760px">
+    <div class="between">
+      <div>
+        <h2>Create batch</h2>
+      </div>
+      <button class="btn sm ghost" data-close="batchModal">Close</button>
+    </div>
+
+    <div class="tc-form" style="margin-top:14px">
+      <label class="field full">Project
+        <input id="batchProject" readonly>
+      </label>
+      <label class="field full">Task name
+        <input id="batchName" placeholder="DMS batch 500 — 17/11">
+      </label>
+      <label class="field full">Pool root
+        <input id="poolRoot" value="{{ default_pool }}">
+      </label>
+      <label class="field">Images
+        <input id="budget" type="number" min="10" max="5000" value="{{ default_budget }}">
+      </label>
+      <label class="field">Job size
+        <input id="jobSize" type="number" min="5" max="500" value="{{ default_job_size }}">
+      </label>
+      <label class="field">Seed
+        <input id="seed" type="number" value="7">
+      </label>
+      <label class="field">Assign users (round-robin)
+        <select id="assignees" multiple size="4">
+          <option value="">Loading users…</option>
+        </select>
+      </label>
+      <label class="row full" style="font-size:12px;color:var(--muted)">
+        <input type="checkbox" id="takeAll">
+        Force all images (balanced across jobs)
+      </label>
+      <label class="row full" style="font-size:12px;color:var(--muted)">
+        <input type="checkbox" id="importLabels" checked>
+        Import existing COCO labels (same frames, no coordinate scaling)
+      </label>
+    </div>
+
+    <div id="batchPreview" class="preview-box empty" style="display:none"></div>
+
+    <div class="row" style="margin-top:14px">
+      <button class="btn" id="previewBtn">Preview sample</button>
+      <button class="btn primary" id="createBatchBtn" disabled>Create CVAT task/jobs</button>
+    </div>
+  </div>
+</div>
+
+<!-- Users -->
+<div class="modal" id="usersModal" hidden>
+  <div class="modal-card" style="max-width:820px">
+    <div class="between">
+      <div>
+        <h2>Manage CVAT users</h2>
+      </div>
+      <button class="btn sm ghost" data-close="usersModal">Close</button>
+    </div>
+
+    <div class="section-title" style="margin:14px 0 8px"><h2 style="font-size:14px;margin:0">Create user</h2></div>
+
+    <div class="tc-form">
+      <label class="field">Username
+        <input id="username" placeholder="alice" autocomplete="off">
+      </label>
+      <label class="field">Password
+        <input id="password" type="password" placeholder=">= 8 characters" autocomplete="new-password">
+      </label>
+      <label class="field">Email
+        <input id="email" placeholder="alice@example.local">
+      </label>
+      <label class="field">First name
+        <input id="firstName" placeholder="empty = username">
+      </label>
+      <label class="field">Last name
+        <input id="lastName" placeholder="empty = username">
+      </label>
+      <div class="field" style="justify-content:flex-end">
+        <button class="btn primary" id="createUserBtn">Create account</button>
+      </div>
+    </div>
+
+    <div id="createUserResult" class="preview-box" style="display:none"></div>
+
+    <div class="hr"></div>
+
+    <div class="between">
+      <h3 style="margin:0">Existing users</h3>
+      <span class="sub" id="userListCount"></span>
+    </div>
+    <div class="table-scroll" style="margin-top:8px">
+      <table class="small-table">
+        <thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Email</th><th></th></tr></thead>
+        <tbody id="userRows"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div id="userDetail" class="preview-box" style="display:none"></div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ asset('jobs.js') }}"></script>{% endblock %}

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Train Console</title>
+  <link rel="stylesheet" href="{{ asset('app.css') }}">
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="card login-card">
+      <h1>train<span style="color:var(--accent)">console</span></h1>
+      <form method="post" action="/login" class="stack">
+        <label class="field">Username<input name="username" autocomplete="username" required autofocus></label>
+        <label class="field">Password<input name="password" type="password" autocomplete="current-password" required></label>
+        <button class="btn primary" type="submit">Sign in</button>
+        {% if error %}<div class="error">{{ error }}</div>{% endif %}
+      </form>
+    </div>
+  </div>
+</body>
+</html>

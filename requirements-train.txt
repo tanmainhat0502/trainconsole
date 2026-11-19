@@ -1,0 +1,5 @@
+# Training environment (separate conda env, e.g. "tanmai")
+#
+# Install torch/torchvision with the CUDA build that matches your GPU first:
+#   https://pytorch.org/get-started/locally/
+ultralytics>=8.4.117

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Train Console{% endblock %}</title>
+  <link rel="stylesheet" href="{{ asset('app.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">train<span style="color:var(--accent)">console</span></div>
+    <nav class="nav">
+      <a href="/management" class="{% if page == 'management' %}active{% endif %}">Management</a>
+      <a href="/training" class="{% if page == 'training' %}active{% endif %}">Training</a>
+    </nav>
+    <div class="spacer"></div>
+    <span class="user">{{ user }} · admin</span>
+    <a class="btn sm ghost" href="/logout">Sign out</a>
+  </header>
+  {% block body %}{% endblock %}
+  <div id="toast" class="toast"></div>
+  <script>
+    window.TC = { page: {{ page|tojson }}, user: {{ user|tojson }} };
+    function toast(message, kind) {
+      const el = document.getElementById('toast');
+      el.textContent = message;
+      el.style.display = 'block';
+      el.style.borderColor = kind === 'error' ? 'var(--danger)' : 'var(--border)';
+      clearTimeout(window.__tcToast);
+      window.__tcToast = setTimeout(() => { el.style.display = 'none'; }, 3600);
+    }
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        cache: 'no-store',
+        ...options,
+      });
+      if (response.status === 401) { window.location = '/login'; throw new Error('login required'); }
+      const text = await response.text();
+      let payload = null;
+      try { payload = text ? JSON.parse(text) : null; } catch (error) { payload = text; }
+      if (!response.ok) {
+        const detail = payload && payload.detail ? payload.detail : response.statusText;
+        throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      }
+      return payload;
+    }
+    function badge(text, kind = '') { return `<span class="badge ${kind}">${text}</span>`; }
+    function statusKind(value) {
+      if (['completed', 'approved'].includes(value)) return 'ok';
+      if (['in progress', 'running', 'queued', 'new'].includes(value)) return value === 'new' ? '' : 'info';
+      if (['rejected', 'failed'].includes(value)) return 'bad';
+      return '';
+    }
+    function pct(value) { return `${Math.max(0, Math.min(100, Number(value) || 0))}%`; }
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
