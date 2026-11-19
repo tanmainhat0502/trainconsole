@@ -48,6 +48,28 @@ class Database:
                 connection.execute(
                     text("ALTER TABLE tc_infer_runs ADD COLUMN job_ids JSON")
                 )
+        if "gpu" not in columns:
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text("ALTER TABLE tc_infer_runs ADD COLUMN gpu VARCHAR(64)")
+                )
+        if "batch" not in columns:
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text("ALTER TABLE tc_infer_runs ADD COLUMN batch INTEGER")
+                )
+        if "tc_models" in inspector.get_table_names():
+            model_columns = {
+                column["name"] for column in inspector.get_columns("tc_models")
+            }
+            if "family" not in model_columns:
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "ALTER TABLE tc_models ADD COLUMN family VARCHAR(32) "
+                            "NOT NULL DEFAULT 'yolo26'"
+                        )
+                    )
 
     @contextmanager
     def session(self) -> Iterator[Session]:

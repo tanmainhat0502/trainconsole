@@ -278,3 +278,17 @@ body { min-height: 100vh; }
   border-radius: 6px; cursor: pointer; font-family: inherit;
 }
 .dropdown-item:hover { background: var(--panel-2); }
+
+/* RF-DETR compare grid */
+.compare-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px; max-height: 65vh; overflow: auto; margin-top: 10px;
+}
+.compare-grid figure {
+  margin: 0; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden;
+}
+.compare-grid img { display: block; width: 100%; height: auto; }
+.compare-grid figcaption {
+  padding: 6px 8px; font-size: 11px; color: var(--muted); word-break: break-all;
+}

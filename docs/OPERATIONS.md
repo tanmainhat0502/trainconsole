@@ -35,13 +35,36 @@ The console reads CVAT through `TC_CVAT_URL`; job links use
 
 ## Training
 
+- **Model**: choose **YOLO26x** or **RF-DETR-2XL** in the train form (and in
+  the Infer dialog). YOLO uses per-GPU batch; RF-DETR uses `batch_size="auto"`.
 - **Train & Infer**: trains on all `completed` jobs of the project, then queues
   inference for `new` jobs with the new weights. Job exports are cached in
   `var/trainconsole/job_cache` and reused while the job's CVAT `updated_date`
   is unchanged, so a later train only exports new or re-annotated jobs.
   Delete that folder to force a full re-export (`TC_EXPORT_CACHE=0` disables
   reuse).
-- **Infer**: inference only, newest weights, no training.
+- After a **successful** run, only the newest checkpoint per **project + model
+  family** is kept
+  under `train_runs/*/train/weights`; older `best.pt` / `last.pt` files are
+  deleted. Datasets and logs are kept. Set `TC_PRUNE_OLD_WEIGHTS=0` to keep
+  every checkpoint. Old `ModelVersion` rows stay as `retired` for history, but
+  their files are gone — enable the setting if you need rollback/promotion of
+  old models. Training YOLO does not delete the newest RF-DETR checkpoint and
+  vice versa, so Compare always has both.
+- **Inference GPU/batch**: manual Infer uses the GPU list and per-GPU batch
+  from the form; auto-infer inherits the training run's settings. With several
+  GPUs, jobs are split across GPUs and each GPU uses the same batch.
+- **RF-DETR-2XL**: set `TC_RFDETR_PYTHON` to its env (Python >= 3.10 with
+  `ultralytics` and `rfdetr[train,plus]`). The worker interpreter
+  (`TC_WORKER_PYTHON`) must also have `ultralytics` + `rfdetr` for RF-DETR
+  inference. Training uses the same YOLO-format dataset (seatbelt excluded by
+  `TC_EXCLUDE_FROM_DETECTION`).
+- **Compare 50**: requires one checkpoint of each family. It reads 50 random
+  images from the project pool, uses the GPU list and per-GPU batch from the
+  form, draws GT (green), YOLO (blue) and DETR (red), and never writes to
+  CVAT. The modal offers **View last compare** (cached result) or **Run new
+  50 images** (fresh inference).
+- **Infer**: inference only, newest weights of the selected family, no training.
 - **Export labels ▾**: COCO JSON for `completed` jobs only or `all` jobs.
 - Progress is per epoch (`epoch x/y`, 45% → 95% → 100%).
 - **Cancel** stops the YOLO subprocess and frees the GPU.

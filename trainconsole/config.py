@@ -91,9 +91,22 @@ class Settings:
     train_python: str = field(
         default_factory=lambda: _env("TC_TRAIN_PYTHON", "python3")
     )
+    rfdetr_python: str = field(
+        default_factory=lambda: _env("TC_RFDETR_PYTHON", "python3")
+    )
+    rfdetr_model: str = field(
+        default_factory=lambda: _env("TC_RFDETR_MODEL", "RFDETR2XLarge")
+    )
+    rfdetr_resolution: int = field(
+        default_factory=lambda: int(_env("TC_RFDETR_RESOLUTION", "880"))
+    )
     workers: int = field(default_factory=lambda: int(_env("TC_YOLO_WORKERS", "2")))
     export_cache: bool = field(
         default_factory=lambda: _env("TC_EXPORT_CACHE", "1").strip().lower()
+        not in {"0", "false", "no", "off"}
+    )
+    prune_old_weights: bool = field(
+        default_factory=lambda: _env("TC_PRUNE_OLD_WEIGHTS", "1").strip().lower()
         not in {"0", "false", "no", "off"}
     )
     confidence: float = field(default_factory=lambda: float(_env("TC_CONF", "0.25")))

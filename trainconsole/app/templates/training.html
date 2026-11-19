@@ -20,13 +20,19 @@
 
   <section class="card" style="margin-top:16px">
     <div class="section-title">
-      <h2>Train &amp; Infer YOLO26x</h2>
+      <h2>Train &amp; Infer</h2>
       <div class="row">
         <span class="badge info" id="completedBadge">—</span>
         <span class="badge warn" id="newBadge">—</span>
       </div>
     </div>
     <div class="tc-form">
+      <label class="field full">Model
+        <select id="trainFamily">
+          <option value="yolo26">YOLO26x (detection)</option>
+          <option value="rfdetr">RF-DETR-2XL (detection)</option>
+        </select>
+      </label>
       <label class="field full">Task IDs (empty = all tasks)
         <input id="trainTaskIds" placeholder="22,21">
       </label>
@@ -40,9 +46,11 @@
         </div>
       </label>
       <div class="full sub" id="gpuTestResult" style="display:none"></div>
+      <div class="full sub" id="familyHint"></div>
       <div class="full row">
         <button class="btn success" id="trainBtn">Train &amp; Infer</button>
         <button class="btn" id="inferBtn">Infer</button>
+        <button class="btn" id="compareBtn">Compare 50</button>
         <div class="dropdown">
           <button class="btn" id="exportBtn">Export labels ▾</button>
           <div class="dropdown-menu" id="exportMenu" hidden>
@@ -85,6 +93,12 @@
       <button class="btn sm ghost" data-close="inferModal">Close</button>
     </div>
     <div class="tc-form" style="margin-top:14px">
+      <label class="field full">Model
+        <select id="inferFamily">
+          <option value="yolo26">YOLO26x (detection)</option>
+          <option value="rfdetr">RF-DETR-2XL (detection)</option>
+        </select>
+      </label>
       <label class="field full">Scope
         <select id="inferScope">
           <option value="all">All jobs in state new (Task IDs above apply)</option>
@@ -96,13 +110,37 @@
       </label>
       <div class="full sub">
         Only jobs in state <b>new</b> are changed; <b>in progress</b> and
-        <b>completed</b> jobs are skipped. Inference uses the newest weights.
+        <b>completed</b> jobs are skipped. Inference uses the newest weights and
+        the GPU/batch from the form above.
       </div>
       <div class="full row">
         <button class="btn success" id="inferQueueBtn">Queue inference</button>
         <button class="btn ghost" data-close="inferModal">Cancel</button>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- Compare modal -->
+<div class="modal" id="compareModal" hidden>
+  <div class="modal-card" style="max-width:1200px">
+    <div class="between">
+      <div>
+        <h2>Compare YOLO26x vs RF-DETR-2XL</h2>
+        <div class="sub" id="compareMeta"></div>
+      </div>
+      <button class="btn sm ghost" data-close="compareModal">Close</button>
+    </div>
+    <div class="row" style="margin:10px 0;flex-wrap:wrap">
+      <button class="btn" id="compareViewBtn" disabled>View last compare</button>
+      <button class="btn success" id="compareRunBtn">Run new 50 images</button>
+      <span class="badge ok">GT · green</span>
+      <span class="badge info">YOLO · blue</span>
+      <span class="badge" style="color:#e74c3c;border-color:#e74c3c">DETR · red</span>
+      <span class="sub">View last uses the cached result; Run new infers 50 fresh pool images · no CVAT writes</span>
+    </div>
+    <div id="compareStatus" class="sub">Choose “View last compare” or “Run new 50 images”.</div>
+    <div class="compare-grid" id="compareGrid"></div>
   </div>
 </div>
 {% endblock %}

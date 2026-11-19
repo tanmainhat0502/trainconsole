@@ -71,6 +71,26 @@ def eligible_jobs(project_id: int, task_ids: list[int] | None = None) -> list[di
     ]
 
 
+def inference_job_ids(
+    project_id: int,
+    task_ids: list[int] | None,
+    job_ids: list[int] | None = None,
+) -> list[int]:
+    """Job IDs the current inference run would touch; used to split GPUs."""
+
+    if job_ids:
+        requested = jobs_by_ids(job_ids)
+        wrong = [
+            item["id"] for item in requested if item["project_id"] != int(project_id)
+        ]
+        if wrong:
+            raise ValueError(
+                f"job(s) {wrong} do not belong to project {project_id}"
+            )
+        return [int(item["id"]) for item in requested if item["state"] == "new"]
+    return [int(job["id"]) for job in eligible_jobs(project_id, task_ids)]
+
+
 def _class_names(model: Any, fallback: list[str]) -> list[str]:
     names = getattr(model, "names", None)
     if isinstance(names, dict):
@@ -87,15 +107,24 @@ def run_inference(
     project_id: int,
     task_ids: list[int] | None,
     job_ids: list[int] | None = None,
+    family: str = "yolo26",
+    batch: int = 1,
     confidence: float = 0.25,
     imgsz: int = 640,
     gpu: str = "0",
     progress: Progress | None = None,
 ) -> dict[str, Any]:
-    from ultralytics import YOLO
+    if family == "rfdetr":
+        from rfdetr import RFDETR
 
-    model = YOLO(model_path)
-    class_names = _class_names(model, names)
+        device = f"cuda:{gpu}" if str(gpu).isdigit() else "cuda:0"
+        model = RFDETR.from_checkpoint(model_path, device=device)
+        class_names = list(getattr(model, "class_names", None) or names)
+    else:
+        from ultralytics import YOLO
+
+        model = YOLO(model_path)
+        class_names = _class_names(model, names)
     skipped = 0
     if job_ids:
         requested = jobs_by_ids(job_ids)
@@ -134,55 +163,117 @@ def run_inference(
             label_ids = {label.name: int(label.id) for label in task.get_labels()}
             shapes: list[dict[str, Any]] = []
             start, stop = int(job.start_frame), int(job.stop_frame)
-            for frame in range(start, stop + 1):
-                stream = None
-                try:
-                    stream = task.get_frame(frame)
-                    image = Image.open(BytesIO(stream.read() if hasattr(stream, "read") else bytes(stream))).convert("RGB")
-                finally:
-                    if stream is not None and hasattr(stream, "close"):
-                        stream.close()
-                results = model.predict(
-                    source=image,
-                    conf=float(confidence),
-                    imgsz=int(imgsz),
-                    iou=float(settings.nms_iou),
-                    max_det=int(settings.max_detections),
-                    device=gpu,
-                    verbose=False,
-                )
-                boxes = getattr(results[0], "boxes", None)
-                if boxes is None:
-                    continue
-                frame_boxes: list[dict[str, Any]] = []
-                for box in boxes:
-                    class_id = int(box.cls[0].item()) if hasattr(box.cls[0], "item") else int(box.cls[0])
-                    if class_id >= len(class_names):
-                        continue
-                    label_id = label_ids.get(class_names[class_id])
-                    if label_id is None:
-                        continue
-                    x1, y1, x2, y2 = [float(value) for value in box.xyxy[0].tolist()]
-                    score = float(box.conf[0].item()) if hasattr(box.conf[0], "item") else float(box.conf[0])
-                    frame_boxes.append(
-                        {
-                            "frame": frame,
-                            "label_id": label_id,
-                            "type": "rectangle",
-                            "points": [x1, y1, x2, y2],
-                            "score": score,
-                        }
+            batch = max(1, int(batch))
+            frames = list(range(start, stop + 1))
+            for offset in range(0, len(frames), batch):
+                batch_frames = frames[offset : offset + batch]
+                images = []
+                for frame in batch_frames:
+                    stream = None
+                    try:
+                        stream = task.get_frame(frame)
+                        images.append(
+                            Image.open(
+                                BytesIO(
+                                    stream.read()
+                                    if hasattr(stream, "read")
+                                    else bytes(stream)
+                                )
+                            ).convert("RGB")
+                        )
+                    finally:
+                        if stream is not None and hasattr(stream, "close"):
+                            stream.close()
+                if family == "rfdetr":
+                    source = images if len(images) > 1 else images[0]
+                    raw = model.predict(source, threshold=float(confidence))
+                    detections_list = raw if isinstance(raw, list) else [raw]
+                else:
+                    source = images if len(images) > 1 else images[0]
+                    results = model.predict(
+                        source=source,
+                        conf=float(confidence),
+                        imgsz=int(imgsz),
+                        iou=float(settings.nms_iou),
+                        max_det=int(settings.max_detections),
+                        device=gpu,
+                        verbose=False,
                     )
-                # YOLO26 is end-to-end (no built-in NMS), so drop duplicates and
-                # nested boxes here before uploading them to CVAT.
-                kept = _dedupe_boxes(
-                    frame_boxes,
-                    iou_threshold=float(settings.nms_iou),
-                    containment_threshold=float(settings.nms_containment),
-                )
-                shapes.extend(kept)
-                counts["images"] += 1
-                counts["boxes"] += len(kept)
+                    detections_list = results if isinstance(results, list) else [results]
+                for frame, detections in zip(batch_frames, detections_list):
+                    if family == "rfdetr":
+                        per_name = None
+                        if getattr(detections, "data", None):
+                            per_name = detections.data.get("class_name")
+                        frame_boxes = []
+                        for det_index in range(len(detections)):
+                            class_id = int(detections.class_id[det_index])
+                            label_name = (
+                                str(per_name[det_index])
+                                if per_name is not None
+                                else (
+                                    class_names[class_id]
+                                    if class_id < len(class_names)
+                                    else None
+                                )
+                            )
+                            label_id = label_ids.get(label_name)
+                            if label_id is None:
+                                continue
+                            x1, y1, x2, y2 = [
+                                float(value)
+                                for value in detections.xyxy[det_index]
+                            ]
+                            frame_boxes.append(
+                                {
+                                    "frame": frame,
+                                    "label_id": label_id,
+                                    "type": "rectangle",
+                                    "points": [x1, y1, x2, y2],
+                                    "score": float(detections.confidence[det_index]),
+                                }
+                            )
+                    else:
+                        boxes = getattr(detections, "boxes", None)
+                        if boxes is None:
+                            continue
+                        frame_boxes = []
+                        for box in boxes:
+                            class_id = (
+                                int(box.cls[0].item())
+                                if hasattr(box.cls[0], "item")
+                                else int(box.cls[0])
+                            )
+                            if class_id >= len(class_names):
+                                continue
+                            label_id = label_ids.get(class_names[class_id])
+                            if label_id is None:
+                                continue
+                            x1, y1, x2, y2 = [
+                                float(value) for value in box.xyxy[0].tolist()
+                            ]
+                            score = (
+                                float(box.conf[0].item())
+                                if hasattr(box.conf[0], "item")
+                                else float(box.conf[0])
+                            )
+                            frame_boxes.append(
+                                {
+                                    "frame": frame,
+                                    "label_id": label_id,
+                                    "type": "rectangle",
+                                    "points": [x1, y1, x2, y2],
+                                    "score": score,
+                                }
+                            )
+                    kept = _dedupe_boxes(
+                        frame_boxes,
+                        iou_threshold=float(settings.nms_iou),
+                        containment_threshold=float(settings.nms_containment),
+                    )
+                    shapes.extend(kept)
+                    counts["images"] += 1
+                    counts["boxes"] += len(kept)
 
             # Re-check right before writing: the user may have started this job
             # while inference was running.

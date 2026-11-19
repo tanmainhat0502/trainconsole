@@ -48,6 +48,8 @@ TC_CVAT_USERNAME=admin
 TC_CVAT_PASSWORD=<mật khẩu CVAT>
 TC_GPU=3
 TC_TRAIN_PYTHON=/home/<user>/anaconda3/envs/tanmai/bin/python
+TC_RFDETR_PYTHON=/home/<user>/anaconda3/envs/rfdetr/bin/python
+TC_WORKER_PYTHON=/home/<user>/anaconda3/envs/rfdetr/bin/python
 TC_POOL_ROOT=./data/pool
 ```
 

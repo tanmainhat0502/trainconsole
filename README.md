@@ -8,7 +8,7 @@ What it does:
 
 - create labeling batches from an image pool and push them to CVAT;
 - assign CVAT users, create/delete labeler accounts;
-- train YOLO26x on completed jobs and run inference on `new` jobs;
+- train YOLO26x or RF-DETR-2XL on completed jobs and run inference on `new` jobs;
 - track progress, cancel runs, export COCO labels, manage model versions.
 
 Ports:
@@ -88,14 +88,21 @@ Screenshots from a reference deployment; numbers match the bullets.
 ![Training](docs/images/04-training.png)
 
 1. **KPIs** — completed jobs, new jobs, production model.
-2. **Train form** — Task IDs (empty = all), epochs, batch (**per GPU**, with a
-   **Test** button that suggests the max batch at ~90% of free VRAM), image
-   size, GPU (single id or `0,1,3`).
+2. **Train form** — model (**YOLO26x** or **RF-DETR-2XL**), Task IDs
+   (empty = all), epochs, batch (**per GPU**; RF-DETR training uses
+   `batch_size="auto"`, the value is used for inference/compare), image size,
+   GPU (single id or `0,1,3`). **Test** shows the YOLO max batch and the last
+   RF-DETR auto batch.
    - **Train & Infer**: train on all completed jobs, then infer new jobs with
      the new weights.
-   - **Infer**: inference only, newest weights. Opens a dialog with two modes:
+   - **Infer**: inference only, newest weights of the selected family. It uses
+     the GPU list and batch from the form. Opens a dialog with two modes:
      **all new jobs** (respects Task IDs above) or **specific job IDs**
      (comma-separated; jobs not in state `new` are skipped).
+   - **Compare 50**: choose **View last compare** (cached result) or
+     **Run new 50 images**. It uses the GPU/batch from the form, shows GT
+     (green), YOLO (blue) and DETR (red) on the same image, and is read-only:
+     no CVAT writes.
    - **Export labels**: COCO JSON for completed jobs only or all jobs.
 3. **Training runs** — 5 latest, per-epoch progress, mAP50 (train 20% seen),
    duration, and **Cancel** while queued/running.
@@ -149,13 +156,26 @@ conda create -n tanmai python=3.10 -y
 conda activate tanmai
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements-train.txt
+
+# RF-DETR-2XL (separate env, Python >= 3.10; torch >= 2.6)
+conda create -n rfdetr python=3.10 -y
+conda activate rfdetr
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+pip install -r requirements-console.txt
+pip install ultralytics "rfdetr[train,plus]"
 ```
+
+RF-DETR-2XL weights are under the Roboflow PML-1.0 license (commercial
+self-hosting requires the Roboflow Enterprise add-on; confirm with your
+organisation). The `rfdetr` training env is also the recommended
+`TC_WORKER_PYTHON` when using RF-DETR inference.
 
 ### 2. Configure
 
 ```bash
 cp .env.example .env
-# edit TC_CVAT_PASSWORD, TC_GPU, TC_TRAIN_PYTHON, TC_POOL_ROOT...
+# edit TC_CVAT_PASSWORD, TC_GPU, TC_TRAIN_PYTHON, TC_RFDETR_PYTHON,
+# TC_WORKER_PYTHON, TC_POOL_ROOT...
 ```
 
 ```text
@@ -192,9 +212,13 @@ Login with `TC_ADMIN_USERNAME` / `TC_ADMIN_PASSWORD` (default `admin`/`admin`).
 - **Training** (`/training`): one **Train & Infer** button, separate **Infer**,
   **Export labels** (COCO: completed/all), 5 latest runs, per-epoch progress,
   cancel button. Exports are cached per job, so retraining only downloads
-  newly completed or re-annotated jobs.
-- **Weights**: first run starts from `yolo26x.pt`; later runs tune the newest
-  project checkpoint. Inference always uses the newest checkpoint.
+  newly completed or re-annotated jobs. After a successful run, only the
+  newest checkpoint **per project and model family** is kept; the other
+  family is untouched so Compare can use both.
+- **Weights**: YOLO starts from `yolo26x.pt`; RF-DETR starts from the
+  COCO-pretrained `RFDETR2XLarge` checkpoint. Later runs tune the newest
+  checkpoint of the same family. Inference uses the family selected in the
+  form.
 - **Inference** runs on all `new` jobs or a chosen list of job IDs, only
   touches `new` jobs, replaces boxes, keeps masks, re-checks state before
   writing. YOLO26 is end-to-end, so the console applies NMS plus a containment

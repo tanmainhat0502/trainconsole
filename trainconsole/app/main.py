@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import secrets
+import shutil
 import signal
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete, select
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
 from ..config import settings
@@ -139,6 +143,8 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
             "project_id": run.cvat_project_id,
             "task_ids": run.task_ids,
             "job_ids": run.job_ids or [],
+            "gpu": run.gpu,
+            "batch": run.batch,
             "model_id": run.model_id,
             "state": run.state,
             "progress": run.progress,
@@ -157,6 +163,7 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
             "path": model.path,
             "names": model.names,
             "metrics": model.metrics,
+            "family": model.family,
             "state": model.state,
             "project_id": model.cvat_project_id,
             "created_at": iso_utc(model.created_at),
@@ -665,6 +672,151 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
             "excluded": [row for row in rows if row["state"] != "new"],
         }
 
+    @app.get("/api/compare/latest")
+    def api_compare_latest(request: Request, project_id: int):
+        require(request)
+        path = (
+            settings.artifact_root
+            / "compare"
+            / f"project_{int(project_id)}.json"
+        )
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="no previous compare")
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"compare cache invalid: {exc}") from exc
+
+    @app.post("/api/compare")
+    async def api_compare(request: Request, session=Depends(db_session)):
+        """Run YOLO26 + RF-DETR on random pool images; read-only, no CVAT writes."""
+
+        require(request)
+        payload = await request.json()
+        project_id = int(payload["project_id"])
+        count = max(1, min(int(payload.get("count") or 50), 200))
+        gpu_raw = str(payload.get("gpu") or settings.gpu)
+        gpus = [
+            part.strip()
+            for part in gpu_raw.replace(" ", ",").split(",")
+            if part.strip()
+        ]
+        if not gpus:
+            gpus = [settings.primary_gpu]
+        for gpu in gpus:
+            if not gpu.isdigit():
+                raise HTTPException(status_code=400, detail=f"invalid GPU id: {gpu}")
+        batch = max(1, int(payload.get("batch") or settings.yolo_batch))
+
+        active_train = session.scalar(
+            select(TrainRun)
+            .where(TrainRun.state.in_(("queued", "running", "cancelling")))
+            .limit(1)
+        )
+        active_infer = session.scalar(
+            select(InferRun)
+            .where(InferRun.state.in_(("queued", "running")))
+            .limit(1)
+        )
+        if active_train is not None or active_infer is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="wait for the current training/inference run to finish",
+            )
+
+        yolo = session.scalar(
+            select(ModelVersion)
+            .where(
+                ModelVersion.cvat_project_id == project_id,
+                ModelVersion.family == "yolo26",
+            )
+            .order_by(ModelVersion.id.desc())
+            .limit(1)
+        )
+        detr = session.scalar(
+            select(ModelVersion)
+            .where(
+                ModelVersion.cvat_project_id == project_id,
+                ModelVersion.family == "rfdetr",
+            )
+            .order_by(ModelVersion.id.desc())
+            .limit(1)
+        )
+        if yolo is None or detr is None:
+            raise HTTPException(
+                status_code=400,
+                detail="train both YOLO26 and RF-DETR-2XL before comparing",
+            )
+
+        try:
+            with cvat_client() as c:
+                project = c.projects.retrieve(project_id)
+                project_name = project.name
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"CVAT project lookup failed: {exc}") from exc
+        config = project_config(project_name)
+        pool = config.pool_root or settings.pool_root
+        coco = config.coco
+        if pool is None or not Path(pool).is_dir():
+            raise HTTPException(status_code=400, detail="project pool root not found")
+        if coco is None or not Path(coco).is_file():
+            raise HTTPException(status_code=400, detail="project COCO ground truth not found")
+
+        compare_root = settings.artifact_root / "compare"
+        compare_root.mkdir(parents=True, exist_ok=True)
+        temp_dir = Path(tempfile.mkdtemp(prefix="compare-", dir=compare_root))
+        result_path = temp_dir / "result.json"
+        script = Path(__file__).resolve().parents[1] / "compare_cli.py"
+        command = [
+            settings.rfdetr_python,
+            str(script),
+            "--pool", str(pool),
+            "--coco", str(coco),
+            "--yolo", yolo.path,
+            "--detr", detr.path,
+            "--count", str(count),
+            "--conf", str(settings.confidence),
+            "--imgsz", str(settings.imgsz),
+            "--gpus", ",".join(gpus),
+            "--batch", str(batch),
+            "--seed", str(random.randint(1, 10**9)),
+            "--nms-iou", str(settings.nms_iou),
+            "--nms-containment", str(settings.nms_containment),
+            "--out", str(result_path),
+        ]
+        env = {**os.environ}
+
+        def _run() -> subprocess.CompletedProcess:
+            return subprocess.run(
+                command,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+
+        try:
+            completed = await run_in_threadpool(_run)
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout or "").strip()[-3000:]
+                raise HTTPException(
+                    status_code=500, detail=f"compare failed: {detail}"
+                )
+            data = json.loads(result_path.read_text(encoding="utf-8"))
+            data["model_yolo"] = yolo.name
+            data["model_detr"] = detr.name
+            data["created_at"] = datetime.now(timezone.utc).isoformat()
+            cache_path = compare_root / f"project_{project_id}.json"
+            temp_cache = cache_path.with_suffix(".tmp")
+            temp_cache.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            os.replace(temp_cache, cache_path)
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(status_code=504, detail="compare timed out") from exc
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        return data
+
     @app.post("/api/train-runs")
     async def api_train(request: Request, session=Depends(db_session)):
         require(request)
@@ -680,13 +832,18 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
                 raise HTTPException(
                     status_code=400, detail=f"invalid GPU id: {token}"
                 )
+        family = str(payload.get("family") or "yolo26")
+        if family not in {"yolo26", "rfdetr"}:
+            raise HTTPException(status_code=400, detail=f"invalid model family: {family}")
+        label = "RF-DETR-2XL" if family == "rfdetr" else "YOLO26x"
         run = TrainRun(
-            name=payload.get("name") or f"YOLO26x {datetime.now():%Y-%m-%d %H:%M}",
+            name=payload.get("name") or f"{label} {datetime.now():%Y-%m-%d %H:%M}",
             cvat_project_id=int(payload["project_id"]),
             task_ids=[int(value) for value in (payload.get("task_ids") or [])],
             state="queued",
             stage="waiting for the worker",
             config={
+                "family": family,
                 "epochs": int(payload.get("epochs") or settings.epochs),
                 "batch": int(payload.get("batch") or settings.yolo_batch),
                 "imgsz": int(payload.get("imgsz") or settings.imgsz),
@@ -700,7 +857,8 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
 
     @app.post("/api/gpu/test")
     async def api_gpu_test(request: Request, session=Depends(db_session)):
-        """Suggest a max per-GPU batch size for the selected GPUs."""
+        """Suggest YOLO batch and show the last RF-DETR auto-batch."""
+
         require(request)
         payload = await request.json()
         gpu_raw = str(payload.get("gpu") or "")
@@ -712,13 +870,17 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
                 raise HTTPException(status_code=400, detail=f"invalid GPU id: {token}")
         gpus = [int(token) for token in gpus]
         imgsz = int(payload.get("imgsz") or settings.imgsz)
-
-        weights = settings.model
         project_id = payload.get("project_id")
+
+        # The YOLO probe must never receive an RF-DETR checkpoint.
+        weights = settings.model
         if project_id:
             newest = session.scalar(
                 select(ModelVersion)
-                .where(ModelVersion.cvat_project_id == int(project_id))
+                .where(
+                    ModelVersion.cvat_project_id == int(project_id),
+                    ModelVersion.family == "yolo26",
+                )
                 .order_by(ModelVersion.id.desc())
                 .limit(1)
             )
@@ -736,6 +898,7 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
         key = f"v2:{weights}:{imgsz}"
         probe = cache.get(key)
         was_cached = probe is not None
+        yolo_error: str | None = None
         if not probe:
             spec = json.dumps({"weights": weights, "imgsz": imgsz, "gpus": gpus})
             script = Path(__file__).resolve().parents[1] / "gpu_probe.py"
@@ -747,27 +910,26 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
                     text=True,
                     timeout=240,
                 )
-            except subprocess.TimeoutExpired as exc:
-                raise HTTPException(status_code=504, detail="GPU test timed out") from exc
+            except subprocess.TimeoutExpired:
+                yolo_error = "GPU test timed out"
             except FileNotFoundError as exc:
-                raise HTTPException(
-                    status_code=500, detail=f"training env python not found: {exc}"
-                ) from exc
-            if out.returncode != 0:
-                detail = (out.stderr or out.stdout or "").strip().splitlines()[-3:]
-                raise HTTPException(
-                    status_code=400, detail="GPU test failed: " + " ".join(detail)
-                )
-            try:
-                probe = json.loads(out.stdout.strip().splitlines()[-1])
-            except Exception as exc:
-                raise HTTPException(
-                    status_code=500, detail=f"GPU test output invalid: {exc}"
-                ) from exc
-            if probe.get("error"):
-                raise HTTPException(status_code=400, detail=probe["error"])
-            cache[key] = probe
-            cache_file.write_text(json.dumps(cache, indent=2))
+                yolo_error = f"training env python not found: {exc}"
+            else:
+                if out.returncode != 0:
+                    detail = (out.stderr or out.stdout or "").strip().splitlines()[-3:]
+                    yolo_error = "GPU test failed: " + " ".join(detail)
+                else:
+                    try:
+                        probe = json.loads(out.stdout.strip().splitlines()[-1])
+                    except Exception as exc:
+                        yolo_error = f"GPU test output invalid: {exc}"
+                    else:
+                        if probe.get("error"):
+                            yolo_error = str(probe["error"])
+                            probe = None
+                        else:
+                            cache[key] = probe
+                            cache_file.write_text(json.dumps(cache, indent=2))
 
         try:
             free_out = subprocess.check_output(
@@ -787,22 +949,79 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
                 status_code=400, detail=f"GPU {','.join(missing)} not found on this machine"
             )
 
-        per_image = float(probe.get("per_image_bytes") or 0)
-        overhead = float(probe.get("overhead_bytes") or 0)
-        per_gpu = {}
-        for g in gpus:
-            budget = free[g] * 0.9 - overhead
-            per_gpu[str(g)] = (
-                max(0, int(budget / per_image) // 2 * 2) if per_image > 0 and budget > 0 else 0
+        yolo_result: dict = {"suggested": 0, "per_gpu": {}, "error": yolo_error}
+        if probe:
+            per_image = float(probe.get("per_image_bytes") or 0)
+            overhead = float(probe.get("overhead_bytes") or 0)
+            per_gpu = {}
+            for g in gpus:
+                budget = free[g] * 0.9 - overhead
+                per_gpu[str(g)] = (
+                    max(0, int(budget / per_image) // 2 * 2)
+                    if per_image > 0 and budget > 0
+                    else 0
+                )
+            yolo_result = {
+                "suggested": min(per_gpu.values()) if per_gpu else 0,
+                "per_gpu": per_gpu,
+                "error": None,
+            }
+
+        rfdetr_result: dict = {"batch": None, "grad_accum": None, "source": None}
+        if project_id:
+            runs = list(
+                session.scalars(
+                    select(TrainRun)
+                    .where(
+                        TrainRun.cvat_project_id == int(project_id),
+                        TrainRun.state == "completed",
+                    )
+                    .order_by(TrainRun.id.desc())
+                    .limit(30)
+                )
             )
-        suggested = min(per_gpu.values()) if per_gpu else 0
+            for run in runs:
+                if str((run.config or {}).get("family") or "yolo26") != "rfdetr":
+                    continue
+                cfg_path = (
+                    settings.artifact_root
+                    / "train_runs"
+                    / str(run.id)
+                    / "train"
+                    / "training_config.json"
+                )
+                if not cfg_path.is_file():
+                    continue
+                try:
+                    train_cfg = json.loads(cfg_path.read_text(encoding="utf-8")).get(
+                        "train_config", {}
+                    )
+                except Exception:
+                    continue
+                rfdetr_result = {
+                    "batch": train_cfg.get("batch_size"),
+                    "grad_accum": train_cfg.get("grad_accum_steps"),
+                    "source": f"run {run.id}",
+                }
+                break
+
+        print(
+            "gpu test "
+            f"gpus={gpus} imgsz={imgsz} "
+            f"yolo_batch={yolo_result.get('suggested')} "
+            f"rfdetr_batch={rfdetr_result.get('batch')}",
+            flush=True,
+        )
+        free_gb = {str(g): round(free[g] / 1024**3, 1) for g in gpus}
         return {
-            "suggested": suggested,
-            "per_gpu": per_gpu,
-            "free_gb": {str(g): round(free[g] / 1024**3, 1) for g in gpus},
+            "suggested": yolo_result.get("suggested") or 0,
+            "per_gpu": yolo_result.get("per_gpu") or {},
+            "free_gb": free_gb,
             "imgsz": imgsz,
             "gpus": [str(g) for g in gpus],
             "cached": was_cached,
+            "yolo": yolo_result,
+            "rfdetr": rfdetr_result,
         }
 
     @app.get("/api/train-runs")
@@ -854,18 +1073,40 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
                 raise HTTPException(status_code=400, detail=f"invalid job id: {value}")
             if job_id not in job_ids:
                 job_ids.append(job_id)
-        # Inference always runs with the newest trained weights.
-        latest = session.scalar(
-            select(ModelVersion)
-            .where(ModelVersion.cvat_project_id == project_id)
-            .order_by(ModelVersion.id.desc())
-            .limit(1)
+        gpu_raw = str(payload.get("gpu") or settings.gpu)
+        gpus = ",".join(
+            part.strip()
+            for part in gpu_raw.replace(" ", ",").split(",")
+            if part.strip()
         )
+        if not gpus:
+            gpus = settings.gpu
+        for token in gpus.split(","):
+            if not token.isdigit():
+                raise HTTPException(status_code=400, detail=f"invalid GPU id: {token}")
+        batch = max(1, int(payload.get("batch") or settings.yolo_batch))
+        # Inference uses the newest weights of the requested family.
+        family = payload.get("family")
+        if family is not None and family not in {"yolo26", "rfdetr"}:
+            raise HTTPException(status_code=400, detail=f"invalid model family: {family}")
+        query = select(ModelVersion).where(
+            ModelVersion.cvat_project_id == project_id
+        )
+        if family:
+            query = query.where(ModelVersion.family == family)
+        latest = session.scalar(query.order_by(ModelVersion.id.desc()).limit(1))
+        if latest is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"no trained model for {family or 'this project'}",
+            )
         run = InferRun(
             name=payload.get("name") or f"Infer {datetime.now():%Y-%m-%d %H:%M}",
             cvat_project_id=project_id,
             task_ids=[int(value) for value in (payload.get("task_ids") or [])],
             job_ids=job_ids,
+            gpu=gpus,
+            batch=batch,
             model_id=latest.id if latest else None,
             state="queued",
             stage="waiting for the worker",

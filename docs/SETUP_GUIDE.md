@@ -85,6 +85,21 @@ pip install -r requirements-train.txt
 
 Trỏ `TC_TRAIN_PYTHON` tới python của env `tanmai`.
 
+### RF-DETR-2XL (tuỳ chọn)
+
+```bash
+conda create -n rfdetr python=3.10 -y
+conda activate rfdetr
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+pip install -r requirements-console.txt
+pip install ultralytics "rfdetr[train,plus]"
+```
+
+Trỏ `TC_RFDETR_PYTHON` và `TC_WORKER_PYTHON` tới python của env `rfdetr`.
+`TC_WORKER_PYTHON` cần có cả `ultralytics` + `rfdetr` để inference RF-DETR.
+Lưu ý: RF-DETR-2XL dùng license Roboflow PML-1.0; self-host commercial cần
+Enterprise add-on.
+
 ## 5. Chạy
 
 ```bash
@@ -117,6 +132,10 @@ Login: `admin` / `TC_ADMIN_PASSWORD` (mặc định `admin`).
 
 1. **Management** → chọn project CVAT.
 2. **+ New batch** → pool, số ảnh, job size, assign user, import COCO.
+3. **Training** → chọn model **YOLO26x** hoặc **RF-DETR-2XL**; **Test** hiển
+   thị batch YOLO và batch RF-DETR (lần train gần nhất). **Compare 50** cho
+   chọn **View last compare** (kết quả cũ) hoặc **Run new 50 images**; dùng
+   GPU/batch trên form, không ghi CVAT.
 3. **Preview sample** → **Create CVAT task/jobs** (đẩy sang CVAT đã có).
 4. User label/review trong CVAT.
 5. **Training** → **Train & Infer**.

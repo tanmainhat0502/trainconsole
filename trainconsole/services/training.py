@@ -214,6 +214,199 @@ def cached_job_export(job: dict[str, Any], cache_dir: Path) -> tuple[Path, bool]
     return cache_path, False
 
 
+def prune_old_weights(artifact_root: Path, keep_paths: set[Path]) -> tuple[int, int]:
+    """Delete old checkpoints under ``train_runs`` after a successful train.
+
+    Only the newest production checkpoint of each project is kept (passed in
+    ``keep_paths``); ``last.pt`` and checkpoints from older runs are removed.
+    Returns ``(removed_files, freed_bytes)``.
+    """
+
+    root = (Path(artifact_root) / "train_runs").resolve()
+    if not root.is_dir():
+        return 0, 0
+    keep = {Path(path).resolve() for path in keep_paths}
+    removed = 0
+    freed = 0
+    for pattern in ("*.pt", "*.pth", "*.ckpt"):
+        for path in root.glob(f"*/train/weights/{pattern}"):
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if resolved in keep or root not in resolved.parents:
+                continue
+            try:
+                size = path.stat().st_size
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+            freed += size
+    return removed, freed
+
+
+def build_rfdetr_dataset(dataset: dict[str, Any], out_dir: Path) -> Path:
+    """Build the Roboflow/YOLO layout expected by RF-DETR.
+
+    RF-DETR auto-detects YOLO datasets from ``data.yaml``; it expects
+    ``train/images``, ``train/labels``, ``valid/images``, ``valid/labels``.
+    Images/labels are hard-linked from the YOLO dataset built above.
+    """
+
+    source = Path(dataset["data_file"]).parent
+    target = Path(out_dir) / "rfdetr"
+    for src_split, dst_split in (("train", "train"), ("val", "valid")):
+        for kind in ("images", "labels"):
+            src = source / kind / src_split
+            dst = target / dst_split / kind
+            dst.mkdir(parents=True, exist_ok=True)
+            if not src.is_dir():
+                continue
+            for path in src.iterdir():
+                if not path.is_file():
+                    continue
+                dest = dst / path.name
+                if dest.exists():
+                    dest.unlink()
+                try:
+                    os.link(path, dest)
+                except OSError:
+                    shutil.copy2(path, dest)
+    data = {
+        "path": str(target.resolve()),
+        "train": "train/images",
+        "val": "valid/images",
+        "names": {index: name for index, name in enumerate(dataset["names"])},
+    }
+    (target / "data.yaml").write_text(
+        yaml.safe_dump(data, sort_keys=False), encoding="utf-8"
+    )
+    return target
+
+
+def _rfdetr_epoch_from_log(path: Path, default_total: int) -> tuple[int, int] | None:
+    """Read the newest Lightning ``Epoch N:`` line from an RF-DETR log."""
+
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 65536))
+            data = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    matches = re.findall(r"Epoch\s+(\d+):", data)
+    if not matches:
+        return None
+    return min(int(matches[-1]) + 1, default_total), default_total
+
+
+def train_rfdetr(
+    dataset_dir: Path,
+    run_dir: Path,
+    *,
+    epochs: int,
+    batch: str | int,
+    resolution: int,
+    gpu: str,
+    base_model: str | None,
+    progress: Progress | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    report_pid: Callable[[int], None] | None = None,
+) -> dict[str, Any]:
+    """Train RF-DETR in a separate Python environment (Python >= 3.10)."""
+
+    run_dir = Path(run_dir).resolve()
+    run_dir.mkdir(parents=True, exist_ok=True)
+    result_file = run_dir / "result.json"
+    status_file = run_dir / "progress.json"
+    log_path = run_dir / "train.log"
+    status_file.unlink(missing_ok=True)
+    first_gpu = str(gpu or settings.gpu).split(",")[0].strip() or "0"
+    script = Path(__file__).resolve().parents[1] / "rfdetr_cli.py"
+    command = [
+        settings.rfdetr_python,
+        str(script),
+        "--data", str(dataset_dir),
+        "--run-dir", str(run_dir),
+        "--epochs", str(max(1, int(epochs))),
+        "--batch", str(batch),
+        "--resolution", str(max(64, int(resolution))),
+        "--gpu", "0",
+        "--model", settings.rfdetr_model,
+        "--result", str(result_file),
+        "--status", str(status_file),
+    ]
+    if base_model:
+        command += ["--base", str(base_model)]
+    if progress:
+        progress(45, f"{settings.rfdetr_model} · GPU {first_gpu}")
+    last_status: tuple[int, int] | None = None
+    env = {**os.environ, "PYTHONUNBUFFERED": "1", "CUDA_VISIBLE_DEVICES": first_gpu}
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write(" ".join(command) + "\n")
+        log.flush()
+        process = subprocess.Popen(
+            command,
+            cwd=Path.cwd(),
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        if report_pid is not None:
+            report_pid(process.pid)
+        while process.poll() is None:
+            if should_cancel is not None and should_cancel():
+                kill_process_tree(
+                    process.pid, run_marker=f"train_runs/{run_dir.name}/"
+                )
+                process.wait()
+                raise TrainingCancelled("cancelled by admin")
+            if status_file.exists():
+                try:
+                    payload = json.loads(status_file.read_text(encoding="utf-8"))
+                    epoch = int(payload.get("epoch") or 0)
+                    total = int(payload.get("epochs") or epochs)
+                except Exception:
+                    pass
+                else:
+                    if total > 0 and (epoch, total) != last_status:
+                        last_status = (epoch, total)
+                        if progress:
+                            progress(
+                                45 + int(50 * epoch / total),
+                                f"epoch {epoch}/{total}",
+                            )
+            parsed = _rfdetr_epoch_from_log(log_path, epochs)
+            if parsed is not None:
+                epoch, total = parsed
+                if total > 0 and (epoch, total) != last_status:
+                    last_status = (epoch, total)
+                    if progress:
+                        progress(
+                            45 + int(50 * epoch / total),
+                            f"epoch {epoch}/{total}",
+                        )
+            time.sleep(1)
+    if process.returncode != 0:
+        tail = "\n".join(
+            log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
+        )
+        raise RuntimeError(f"RF-DETR runner exited with {process.returncode}:\n{tail}")
+    payload = json.loads(result_file.read_text(encoding="utf-8"))
+    if progress:
+        progress(95, "RF-DETR checkpoint ready")
+    return {
+        "weights": payload["weights"],
+        "metrics": payload.get("metrics") or {},
+        "base_model": payload.get("base_model") or settings.rfdetr_model,
+        "gpu": first_gpu,
+        "env": "rfdetr",
+    }
+
+
 def build_yolo_dataset(
     jobs: list[dict[str, Any]],
     out_dir: Path,
@@ -341,7 +534,7 @@ def build_yolo_dataset(
     return {"data_file": str(data_file), **counts}
 
 
-def latest_model_path(session, project_id: int | None = None) -> str | None:
+def latest_model_path(session, project_id: int | None = None, family: str | None = None) -> str | None:
     """Return the newest trained checkpoint for the project (or globally)."""
 
     from sqlalchemy import select
@@ -351,11 +544,13 @@ def latest_model_path(session, project_id: int | None = None) -> str | None:
     query = select(ModelVersion)
     if project_id is not None:
         query = query.where(ModelVersion.cvat_project_id == project_id)
+    if family is not None:
+        query = query.where(ModelVersion.family == family)
     model = session.scalar(query.order_by(ModelVersion.id.desc()).limit(1))
     return model.path if model else None
 
 
-def latest_model(session, project_id: int | None = None):
+def latest_model(session, project_id: int | None = None, family: str | None = None):
     """Return the newest ModelVersion row for the project (or globally)."""
 
     from sqlalchemy import select
@@ -365,6 +560,8 @@ def latest_model(session, project_id: int | None = None):
     query = select(ModelVersion)
     if project_id is not None:
         query = query.where(ModelVersion.cvat_project_id == project_id)
+    if family is not None:
+        query = query.where(ModelVersion.family == family)
     return session.scalar(query.order_by(ModelVersion.id.desc()).limit(1))
 
 

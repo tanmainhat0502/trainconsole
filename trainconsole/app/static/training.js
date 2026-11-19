@@ -1,6 +1,7 @@
 let PROJECTS = [];
 let MODELS = [];
 let pollTimer = null;
+let LAST_COMPARE = null;
 
 async function loadProjects() {
   PROJECTS = await api('/api/projects');
@@ -28,8 +29,12 @@ async function loadJobSummary() {
 async function loadModels() {
   const projectId = Number(document.getElementById('projectSelect').value) || null;
   MODELS = await api(`/api/models${projectId ? `?project_id=${projectId}` : ''}`);
-  const latest = MODELS.length ? MODELS[0] : null;
-  document.getElementById('productionModel').textContent = latest ? latest.name : '—';
+  const yolo = MODELS.find((model) => (model.family || 'yolo26') === 'yolo26');
+  const detr = MODELS.find((model) => model.family === 'rfdetr');
+  document.getElementById('productionModel').textContent = [
+    yolo ? `YOLO: ${yolo.name}` : null,
+    detr ? `DETR: ${detr.name}` : null,
+  ].filter(Boolean).join(' · ') || '—';
 }
 
 function durationText(run) {
@@ -130,6 +135,7 @@ async function startTraining() {
         batch: Number(document.getElementById('batch').value),
         imgsz: Number(document.getElementById('imgsz').value),
         gpu: document.getElementById('gpu').value,
+        family: document.getElementById('trainFamily').value,
       }),
     });
     toast(`Queued train + infer (run #${run.id}).`);
@@ -159,6 +165,9 @@ function openInferModal() {
   if (!projectId) return toast('Select a project first.', 'error');
   document.getElementById('inferScope').value = 'all';
   document.getElementById('inferJobIds').value = '';
+  const hasYolo = MODELS.some((model) => (model.family || 'yolo26') === 'yolo26');
+  const hasDetr = MODELS.some((model) => model.family === 'rfdetr');
+  document.getElementById('inferFamily').value = hasYolo || !hasDetr ? 'yolo26' : 'rfdetr';
   syncInferScope();
   document.getElementById('inferModal').hidden = false;
 }
@@ -182,6 +191,9 @@ async function queueInference() {
         project_id: projectId,
         task_ids: mode === 'ids' ? [] : parseTasks('trainTaskIds'),
         job_ids: jobIds,
+        family: document.getElementById('inferFamily').value,
+        gpu: document.getElementById('gpu').value,
+        batch: Number(document.getElementById('batch').value) || 1,
       }),
     });
     toast(mode === 'ids'
@@ -264,19 +276,109 @@ async function testGpu() {
         project_id: Number(document.getElementById('projectSelect').value),
       }),
     });
-    if (!data.suggested) {
-      result.innerHTML = `GPUs ${data.gpus.join(',')}: not enough free VRAM for training.`;
-    } else {
-      const freeStr = data.gpus.map((g) => `${g}:${data.free_gb[g]}GB`).join(' · ');
-      result.innerHTML = `Max batch/GPU ≈ <b>${data.suggested}</b> `
-        + `(total ${data.suggested * data.gpus.length}) · free VRAM ${freeStr} · imgsz ${data.imgsz}`;
-    }
+    const yolo = data.yolo || data;
+    const rf = data.rfdetr || {};
+    const freeStr = data.gpus.map((g) => `${g}:${data.free_gb[g]}GB`).join(' · ');
+    const yoloText = yolo.error
+      ? `YOLO26x: <span style="color:var(--danger)">${escapeHtml(yolo.error)}</span>`
+      : `YOLO26x: max <b>${yolo.suggested}</b>/GPU (total ${yolo.suggested * data.gpus.length})`;
+    const rfText = rf.batch
+      ? `RF-DETR-2XL: <b>${rf.batch}</b>/GPU (auto${rf.grad_accum ? `, accum ${rf.grad_accum}` : ''}${rf.source ? ` · ${escapeHtml(rf.source)}` : ''})`
+      : 'RF-DETR-2XL: auto (no completed run yet)';
+    result.innerHTML = `${yoloText} · ${rfText} · free VRAM ${freeStr} · imgsz ${data.imgsz}`;
   } catch (error) {
     toast(error.message, 'error');
     result.textContent = error.message;
   } finally {
     button.disabled = false;
     button.textContent = 'Test';
+  }
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[char]));
+}
+
+function syncFamilyControls() {
+  const rfdetr = document.getElementById('trainFamily').value === 'rfdetr';
+  document.getElementById('gpuTestBtn').disabled = false;
+  document.getElementById('familyHint').textContent = rfdetr
+    ? 'RF-DETR-2XL: training uses batch_size="auto"; this batch is used for inference/compare.'
+    : 'YOLO26x: batch is per GPU; Test suggests the maximum batch.';
+}
+
+function renderCompare(data) {
+  const grid = document.getElementById('compareGrid');
+  const status = document.getElementById('compareStatus');
+  document.getElementById('compareMeta').textContent =
+    `${data.model_yolo || 'YOLO'} vs ${data.model_detr || 'RF-DETR'}`;
+  const when = data.created_at ? ` · ${new Date(data.created_at).toLocaleString()}` : '';
+  status.textContent =
+    `${data.images.length} images · GT green · YOLO blue · DETR red${when}`;
+  grid.innerHTML = data.images.map((item) => `
+    <figure>
+      <img src="${item.image}" loading="lazy" alt="">
+      <figcaption>${escapeHtml(item.name)}<br>GT ${item.gt} · YOLO ${item.yolo} · DETR ${item.detr}</figcaption>
+    </figure>`).join('');
+}
+
+async function openCompareModal() {
+  const projectId = Number(document.getElementById('projectSelect').value);
+  if (!projectId) return toast('Select a project first.', 'error');
+  const viewButton = document.getElementById('compareViewBtn');
+  const modal = document.getElementById('compareModal');
+  LAST_COMPARE = null;
+  viewButton.disabled = true;
+  document.getElementById('compareGrid').innerHTML = '';
+  document.getElementById('compareMeta').textContent = '';
+  document.getElementById('compareStatus').textContent =
+    'Choose “View last compare” or “Run new 50 images”.';
+  modal.hidden = false;
+  try {
+    const data = await api(`/api/compare/latest?project_id=${projectId}`);
+    LAST_COMPARE = data;
+    viewButton.disabled = false;
+    document.getElementById('compareMeta').textContent =
+      `Last: ${data.model_yolo || 'YOLO'} vs ${data.model_detr || 'RF-DETR'}`;
+  } catch (error) {
+    document.getElementById('compareMeta').textContent = 'No previous compare yet.';
+  }
+}
+
+function viewLastCompare() {
+  if (!LAST_COMPARE) return toast('No previous compare yet.', 'error');
+  renderCompare(LAST_COMPARE);
+}
+
+async function runNewCompare() {
+  const projectId = Number(document.getElementById('projectSelect').value);
+  if (!projectId) return toast('Select a project first.', 'error');
+  const button = document.getElementById('compareRunBtn');
+  const viewButton = document.getElementById('compareViewBtn');
+  button.disabled = true; button.textContent = 'Running 50 images…';
+  document.getElementById('compareGrid').innerHTML = '';
+  document.getElementById('compareMeta').textContent = '';
+  document.getElementById('compareStatus').textContent =
+    'Running YOLO26x and RF-DETR-2XL on 50 random images…';
+  try {
+    const data = await api('/api/compare', {
+      method: 'POST',
+      body: JSON.stringify({
+        project_id: projectId,
+        count: 50,
+        gpu: document.getElementById('gpu').value,
+        batch: Number(document.getElementById('batch').value) || 1,
+      }),
+    });
+    LAST_COMPARE = data;
+    viewButton.disabled = false;
+    renderCompare(data);
+  } catch (error) {
+    document.getElementById('compareStatus').textContent = error.message;
+  } finally {
+    button.disabled = false; button.textContent = 'Run new 50 images';
   }
 }
 
@@ -293,6 +395,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('projectSelect').onchange = () => refreshAll().catch((error) => toast(error.message, 'error'));
     document.getElementById('refreshBtn').onclick = () => refreshAll().catch((error) => toast(error.message, 'error'));
     document.getElementById('trainBtn').onclick = startTraining;
+    document.getElementById('trainFamily').onchange = syncFamilyControls;
+    syncFamilyControls();
+    document.getElementById('compareBtn').onclick = openCompareModal;
+    document.getElementById('compareViewBtn').onclick = viewLastCompare;
+    document.getElementById('compareRunBtn').onclick = runNewCompare;
     document.getElementById('inferBtn').onclick = openInferModal;
     document.getElementById('inferScope').onchange = syncInferScope;
     document.getElementById('inferQueueBtn').onclick = queueInference;

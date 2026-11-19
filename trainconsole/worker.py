@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import json
 import logging
+import os
 from pathlib import Path
+import subprocess
+import sys
 import time
 import traceback
 
@@ -14,13 +18,16 @@ from sqlalchemy import select
 from .config import settings
 from .db import Database, ensure_sqlite_parent
 from .models import InferRun, ModelVersion, TrainRun
-from .services.inference import run_inference
+from .services.inference import inference_job_ids, run_inference
 from .services.training import (
     TrainingCancelled,
+    build_rfdetr_dataset,
     build_yolo_dataset,
     completed_jobs,
     kill_process_tree,
     latest_model,
+    prune_old_weights,
+    train_rfdetr,
     train_yolo,
 )
 
@@ -63,12 +70,41 @@ def _set_train_pid(database: Database, run_id: int, pid: int) -> None:
             db.flush()
 
 
-def _queue_inference(database: Database, *, project_id: int, task_ids: list[int], model_id: int) -> int:
+def _model_keep_paths(database: Database) -> set[Path]:
+    """Checkpoints that must survive cleanup: production + newest per project."""
+
+    with database.session() as db:
+        rows = list(db.scalars(select(ModelVersion).order_by(ModelVersion.id)))
+    newest: dict[tuple[int | None, str], ModelVersion] = {}
+    for row in rows:
+        newest[(row.cvat_project_id, row.family or "yolo26")] = row
+    return {
+        Path(row.path).resolve()
+        for row in rows
+        if row.path
+        and (
+            row.state == "production"
+            or newest.get((row.cvat_project_id, row.family or "yolo26")) is row
+        )
+    }
+
+
+def _queue_inference(
+    database: Database,
+    *,
+    project_id: int,
+    task_ids: list[int],
+    model_id: int,
+    gpu: str,
+    batch: int,
+) -> int:
     with database.session() as db:
         run = InferRun(
             name=f"auto-infer-model-{model_id}",
             cvat_project_id=project_id,
             task_ids=task_ids,
+            gpu=gpu,
+            batch=batch,
             model_id=model_id,
             state="queued",
             stage="waiting for new jobs",
@@ -121,6 +157,7 @@ def process_train(database: Database) -> int | None:
         project_id = run.cvat_project_id
         task_ids = list(run.task_ids or [])
         config = dict(run.config or {})
+        family = str(config.get("family") or "yolo26")
 
     try:
         jobs = completed_jobs(project_id, task_ids)
@@ -141,17 +178,31 @@ def process_train(database: Database) -> int | None:
             progress=dataset_progress,
             should_cancel=lambda: _is_cancelled(database, run_id),
         )
-        _set_train(database, run_id, dataset_dir=str(dataset_dir), progress=40, stage="starting YOLO26x")
+        rfdetr_dataset = None
+        if family == "rfdetr":
+            rfdetr_dataset = build_rfdetr_dataset(dataset, dataset_dir)
+        label = "RF-DETR-2XL" if family == "rfdetr" else "YOLO26x"
+        _set_train(
+            database,
+            run_id,
+            dataset_dir=str(dataset_dir),
+            progress=40,
+            stage=f"starting {label}",
+        )
         with database.session() as db:
             # First run starts from the base checkpoint; later runs tune the
-            # newest trained weights so each round builds on the previous one.
-            previous = latest_model(db, project_id)
-            base = previous.path if previous else settings.model
-            if previous and list(previous.names or []) != list(dataset["names"]):
-                # A model trained before seatbelt was excluded has a different
-                # class order. Start from the base YOLO checkpoint instead of
-                # silently remapping heads.
-                base = settings.model
+            # newest trained weights of the same family.
+            previous = latest_model(db, project_id, family)
+            if family == "yolo26":
+                base = previous.path if previous else settings.model
+                if previous and list(previous.names or []) != list(dataset["names"]):
+                    # A model trained before seatbelt was excluded has a
+                    # different class order; start from the base checkpoint.
+                    base = settings.model
+            else:
+                base = previous.path if previous else None
+                if previous and list(previous.names or []) != list(dataset["names"]):
+                    base = None
         if _is_cancelled(database, run_id):
             _set_train(
                 database,
@@ -161,36 +212,60 @@ def process_train(database: Database) -> int | None:
                 completed_at=_now(),
             )
             return run_id
-        # The batch the user enters is PER GPU: multiply by the GPU count so
-        # Ultralytics DDP (which splits the total batch) gives each GPU the
-        # requested size.
         train_gpu = str(config.get("gpu", settings.gpu))
-        world = len([g for g in train_gpu.split(",") if g.strip()]) or 1
-        total_batch = max(1, int(config.get("batch", settings.yolo_batch))) * world
-        result = train_yolo(
-            dataset_dir,
-            run_dir,
-            epochs=int(config.get("epochs", settings.epochs)),
-            batch=total_batch,
-            imgsz=int(config.get("imgsz", settings.imgsz)),
-            gpu=train_gpu,
-            workers=int(config.get("workers", settings.workers)),
-            base_model=base,
-            progress=lambda progress, stage: _set_train(database, run_id, progress=progress, stage=stage),
-            should_cancel=lambda: _is_cancelled(database, run_id),
-            report_pid=lambda pid: _set_train_pid(database, run_id, pid),
-        )
+        if family == "yolo26":
+            # The batch the user enters is PER GPU: multiply by the GPU count
+            # so Ultralytics DDP gives each GPU the requested size.
+            world = len([g for g in train_gpu.split(",") if g.strip()]) or 1
+            total_batch = max(1, int(config.get("batch", settings.yolo_batch))) * world
+            result = train_yolo(
+                dataset_dir,
+                run_dir,
+                epochs=int(config.get("epochs", settings.epochs)),
+                batch=total_batch,
+                imgsz=int(config.get("imgsz", settings.imgsz)),
+                gpu=train_gpu,
+                workers=int(config.get("workers", settings.workers)),
+                base_model=base,
+                progress=lambda progress, stage: _set_train(
+                    database, run_id, progress=progress, stage=stage
+                ),
+                should_cancel=lambda: _is_cancelled(database, run_id),
+                report_pid=lambda pid: _set_train_pid(database, run_id, pid),
+            )
+        else:
+            assert rfdetr_dataset is not None
+            result = train_rfdetr(
+                rfdetr_dataset,
+                run_dir,
+                epochs=int(config.get("epochs", settings.epochs)),
+                batch="auto",
+                resolution=int(config.get("imgsz") or settings.rfdetr_resolution),
+                gpu=train_gpu,
+                base_model=base,
+                progress=lambda progress, stage: _set_train(
+                    database, run_id, progress=progress, stage=stage
+                ),
+                should_cancel=lambda: _is_cancelled(database, run_id),
+                report_pid=lambda pid: _set_train_pid(database, run_id, pid),
+            )
         with database.session() as db:
             old = db.scalars(
-                select(ModelVersion).where(ModelVersion.state == "production")
+                select(ModelVersion).where(
+                    ModelVersion.state == "production",
+                    ModelVersion.cvat_project_id == project_id,
+                    ModelVersion.family == family,
+                )
             )
             for item in old:
                 item.state = "retired"
+            model_name = "rfdetr-2xl" if family == "rfdetr" else "yolo26x"
             model = ModelVersion(
-                name=f"yolo26x-v{run_id}",
+                name=f"{model_name}-v{run_id}",
                 path=result["weights"],
                 names=dataset["names"],
                 metrics={"classes": dataset, **result["metrics"]},
+                family=family,
                 state="production",
                 train_run_id=run_id,
                 cvat_project_id=project_id,
@@ -207,8 +282,41 @@ def process_train(database: Database) -> int | None:
             run.completed_at = _now()
             db.flush()
             model_id = model.id
+        if settings.prune_old_weights:
+            try:
+                keep_paths = _model_keep_paths(database)
+                removed, freed = prune_old_weights(settings.artifact_root, keep_paths)
+                if removed:
+                    print(
+                        f"pruned {removed} old checkpoint(s), "
+                        f"freed {freed / 2**20:.0f} MiB",
+                        flush=True,
+                    )
+            except Exception as exc:
+                print(
+                    f"checkpoint cleanup failed: {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+        per_gpu_batch = max(1, int(config.get("batch", settings.yolo_batch)))
+        if family == "rfdetr":
+            try:
+                training_cfg = json.loads(
+                    (run_dir / "train" / "training_config.json").read_text(
+                        encoding="utf-8"
+                    )
+                ).get("train_config", {})
+                per_gpu_batch = max(
+                    1, int(training_cfg.get("batch_size") or per_gpu_batch)
+                )
+            except Exception:
+                pass
         infer_id = _queue_inference(
-            database, project_id=project_id, task_ids=task_ids, model_id=model_id
+            database,
+            project_id=project_id,
+            task_ids=task_ids,
+            model_id=model_id,
+            gpu=train_gpu,
+            batch=per_gpu_batch,
         )
         _set_train(database, run_id, stage=f"completed; inference #{infer_id} queued")
         return run_id
@@ -254,12 +362,17 @@ def process_infer(database: Database) -> int | None:
         project_id = run.cvat_project_id
         task_ids = list(run.task_ids or [])
         job_ids = list(run.job_ids or [])
-        model = latest_model(db, project_id)
-        if model is None and run.model_id:
-            model = db.get(ModelVersion, run.model_id)
+        model = db.get(ModelVersion, run.model_id) if run.model_id else None
+        if model is None:
+            model = latest_model(db, project_id)
         model_path = model.path if model else None
         model_names = list(model.names or []) if model else []
         model_id = model.id if model else None
+        model_family = (
+            str(getattr(model, "family", "yolo26") or "yolo26") if model else "yolo26"
+        )
+        infer_gpu = str(run.gpu or settings.primary_gpu)
+        infer_batch = max(1, int(run.batch or 1))
 
     if not model_path or not Path(model_path).exists():
         _set_infer(
@@ -274,19 +387,95 @@ def process_infer(database: Database) -> int | None:
         return run_id
 
     try:
-        counts = run_inference(
-            model_path=model_path,
-            names=model_names,
-            project_id=project_id,
-            task_ids=task_ids,
-            job_ids=job_ids,
-            confidence=settings.confidence,
-            imgsz=settings.imgsz,
-            gpu=settings.primary_gpu,
-            progress=lambda progress, stage: _set_infer(
-                database, run_id, progress=progress, stage=stage
-            ),
-        )
+        gpus = [g.strip() for g in infer_gpu.split(",") if g.strip()] or [
+            settings.primary_gpu
+        ]
+        if len(gpus) <= 1:
+            counts = run_inference(
+                model_path=model_path,
+                names=model_names,
+                project_id=project_id,
+                task_ids=task_ids,
+                job_ids=job_ids,
+                family=model_family,
+                batch=infer_batch,
+                confidence=settings.confidence,
+                imgsz=settings.imgsz,
+                gpu=gpus[0],
+                progress=lambda progress, stage: _set_infer(
+                    database, run_id, progress=progress, stage=stage
+                ),
+            )
+        else:
+            job_list = inference_job_ids(project_id, task_ids, job_ids)
+            if not job_list:
+                counts = {
+                    "jobs": 0,
+                    "processed": 0,
+                    "skipped": 0,
+                    "images": 0,
+                    "boxes": 0,
+                    "model": model_path,
+                }
+            else:
+                _set_infer(
+                    database,
+                    run_id,
+                    progress=10,
+                    stage=f"inference on {len(gpus)} GPUs",
+                )
+                shard_dir = settings.artifact_root / "infer_runs" / str(run_id)
+                shard_dir.mkdir(parents=True, exist_ok=True)
+                script = Path(__file__).resolve().parent / "infer_cli.py"
+                chunks = [job_list[index:: len(gpus)] for index in range(len(gpus))]
+                procs: list[tuple[subprocess.Popen, Path, str, Path]] = []
+                for gpu, chunk in zip(gpus, chunks):
+                    if not chunk:
+                        continue
+                    out_path = shard_dir / f"gpu_{gpu}.json"
+                    log_path = shard_dir / f"gpu_{gpu}.log"
+                    command = [
+                        sys.executable,
+                        str(script),
+                        "--model", model_path,
+                        "--family", model_family,
+                        "--project-id", str(project_id),
+                        "--job-ids", ",".join(str(value) for value in chunk),
+                        "--gpu", gpu,
+                        "--batch", str(infer_batch),
+                        "--out", str(out_path),
+                    ]
+                    log = open(log_path, "w", encoding="utf-8")
+                    proc = subprocess.Popen(
+                        command,
+                        cwd=str(Path.cwd()),
+                        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                    )
+                    procs.append((proc, out_path, gpu, log_path))
+                failures = []
+                for proc, _out_path, gpu, log_path in procs:
+                    code = proc.wait()
+                    if code != 0:
+                        tail = log_path.read_text(
+                            encoding="utf-8", errors="replace"
+                        ).splitlines()[-20:]
+                        failures.append(f"GPU {gpu} exited {code}: " + "\n".join(tail))
+                if failures:
+                    raise RuntimeError("\n".join(failures))
+                counts = {
+                    "jobs": len(job_list),
+                    "processed": 0,
+                    "skipped": 0,
+                    "images": 0,
+                    "boxes": 0,
+                    "model": model_path,
+                }
+                for _proc, out_path, _gpu, _log in procs:
+                    payload = json.loads(out_path.read_text(encoding="utf-8"))
+                    for key in ("processed", "skipped", "images", "boxes"):
+                        counts[key] += int(payload.get(key) or 0)
         _set_infer(
             database,
             run_id,
