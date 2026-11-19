@@ -92,6 +92,10 @@ class Settings:
         default_factory=lambda: _env("TC_TRAIN_PYTHON", "python3")
     )
     workers: int = field(default_factory=lambda: int(_env("TC_YOLO_WORKERS", "2")))
+    export_cache: bool = field(
+        default_factory=lambda: _env("TC_EXPORT_CACHE", "1").strip().lower()
+        not in {"0", "false", "no", "off"}
+    )
     confidence: float = field(default_factory=lambda: float(_env("TC_CONF", "0.25")))
     val_fraction: float = field(default_factory=lambda: float(_env("TC_VAL_FRACTION", "0.2")))
 

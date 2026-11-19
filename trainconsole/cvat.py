@@ -54,6 +54,7 @@ def assignee(job: Any) -> str | None:
 def job_row(job: Any, task: Any | None = None, project_id: int | None = None) -> dict[str, Any]:
     start = int(getattr(job, "start_frame", 0))
     stop = int(getattr(job, "stop_frame", start))
+    updated = getattr(job, "updated_date", None)
     return {
         "id": int(job.id),
         "task_id": int(job.task_id),
@@ -66,6 +67,11 @@ def job_row(job: Any, task: Any | None = None, project_id: int | None = None) ->
         "stop_frame": stop,
         "frames": max(0, stop - start + 1),
         "stage": str(getattr(getattr(job, "stage", ""), "value", getattr(job, "stage", ""))),
+        "updated_date": (
+            updated.isoformat()
+            if hasattr(updated, "isoformat")
+            else (str(updated) if updated else None)
+        ),
         "url": f"{settings.cvat_ui_url}/tasks/{job.task_id}/jobs/{job.id}",
     }
 

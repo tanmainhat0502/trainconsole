@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import os
 import re
 import signal
@@ -18,6 +20,7 @@ from ..config import settings
 from ..cvat import export_job_yolo, list_jobs
 
 Progress = Callable[[int, str], None]
+logger = logging.getLogger(__name__)
 
 
 class TrainingCancelled(RuntimeError):
@@ -145,6 +148,72 @@ def _extract_job(job: dict[str, Any], archive: Path, dataset: Path, split: str) 
     return names_seen
 
 
+def _job_signature(job: dict[str, Any]) -> str | None:
+    value = job.get("updated_date")
+    return str(value) if value else None
+
+
+def _job_cache_valid(job: dict[str, Any], cache_dir: Path) -> bool:
+    if not settings.export_cache:
+        return False
+    signature = _job_signature(job)
+    if not signature:
+        return False
+    job_id = int(job["id"])
+    cache_path = cache_dir / f"job_{job_id}.zip"
+    meta_path = cache_dir / f"job_{job_id}.json"
+    if not cache_path.is_file():
+        return False
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return (
+        meta.get("updated_date") == signature
+        and meta.get("state") == "completed"
+        and meta.get("format") == "YOLO 1.1"
+    )
+
+
+def cached_job_export(job: dict[str, Any], cache_dir: Path) -> tuple[Path, bool]:
+    """Export one job to the persistent cache, reusing it when unchanged.
+
+    CVAT updates ``job.updated_date`` whenever annotations are changed, so a
+    matching timestamp means the cached zip is still valid. Returns
+    ``(archive_path, was_cached)``.
+    """
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    job_id = int(job["id"])
+    cache_path = cache_dir / f"job_{job_id}.zip"
+    meta_path = cache_dir / f"job_{job_id}.json"
+    if _job_cache_valid(job, cache_dir):
+        logger.info("reuse cached export for job %s", job_id)
+        return cache_path, True
+
+    temp_path = cache_dir / f".job_{job_id}.{os.getpid()}.tmp"
+    try:
+        export_job_yolo(job_id, temp_path)
+        os.replace(temp_path, cache_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+    meta = {
+        "job_id": job_id,
+        "task_id": job.get("task_id"),
+        "project_id": job.get("project_id"),
+        "state": "completed",
+        "updated_date": _job_signature(job),
+        "format": "YOLO 1.1",
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+    }
+    meta_tmp = cache_dir / f".job_{job_id}.meta.tmp"
+    meta_tmp.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    os.replace(meta_tmp, meta_path)
+    logger.info("cached export for job %s (%s bytes)", job_id, cache_path.stat().st_size)
+    return cache_path, False
+
+
 def build_yolo_dataset(
     jobs: list[dict[str, Any]],
     out_dir: Path,
@@ -159,15 +228,21 @@ def build_yolo_dataset(
     out_dir.mkdir(parents=True, exist_ok=True)
     exports = out_dir / "exports"
     exports.mkdir(parents=True, exist_ok=True)
+    cache_dir = settings.artifact_root / "job_cache"
     train_jobs = list(jobs)
     names: list[str] | None = None
 
     def extract(job_list: list[dict[str, Any]], split: str) -> None:
         nonlocal names
         for index, job in enumerate(job_list):
+            cached_archive, was_cached = cached_job_export(job, cache_dir)
             archive = exports / f"job_{job['id']}.zip"
-            if not archive.exists():
-                export_job_yolo(job["id"], archive)
+            if archive.exists():
+                archive.unlink()
+            try:
+                os.link(cached_archive, archive)
+            except OSError:
+                shutil.copy2(cached_archive, archive)
             job_names = _extract_job(job, archive, out_dir, split)
             if job_names:
                 parsed = [line.strip() for line in job_names.splitlines() if line.strip()]
@@ -178,7 +253,11 @@ def build_yolo_dataset(
                         f"job {job['id']} has a different class order: {parsed} != {names}"
                     )
             if progress:
-                progress(10 + int(30 * (index + 1) / max(1, len(job_list))), f"export train: job {job['id']}")
+                action = "cached" if was_cached else "export"
+                progress(
+                    10 + int(30 * (index + 1) / max(1, len(job_list))),
+                    f"{action} train: job {job['id']}",
+                )
             if should_cancel is not None and should_cancel():
                 raise TrainingCancelled("cancelled by admin")
 

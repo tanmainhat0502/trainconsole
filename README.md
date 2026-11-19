@@ -191,7 +191,8 @@ Login with `TC_ADMIN_USERNAME` / `TC_ADMIN_PASSWORD` (default `admin`/`admin`).
   CVAT account creation/deletion with stored passwords, per-user progress.
 - **Training** (`/training`): one **Train & Infer** button, separate **Infer**,
   **Export labels** (COCO: completed/all), 5 latest runs, per-epoch progress,
-  cancel button.
+  cancel button. Exports are cached per job, so retraining only downloads
+  newly completed or re-annotated jobs.
 - **Weights**: first run starts from `yolo26x.pt`; later runs tune the newest
   project checkpoint. Inference always uses the newest checkpoint.
 - **Inference** runs on all `new` jobs or a chosen list of job IDs, only

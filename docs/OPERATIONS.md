@@ -36,7 +36,11 @@ The console reads CVAT through `TC_CVAT_URL`; job links use
 ## Training
 
 - **Train & Infer**: trains on all `completed` jobs of the project, then queues
-  inference for `new` jobs with the new weights.
+  inference for `new` jobs with the new weights. Job exports are cached in
+  `var/trainconsole/job_cache` and reused while the job's CVAT `updated_date`
+  is unchanged, so a later train only exports new or re-annotated jobs.
+  Delete that folder to force a full re-export (`TC_EXPORT_CACHE=0` disables
+  reuse).
 - **Infer**: inference only, newest weights, no training.
 - **Export labels ▾**: COCO JSON for `completed` jobs only or `all` jobs.
 - Progress is per epoch (`epoch x/y`, 45% → 95% → 100%).
