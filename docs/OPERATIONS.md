@@ -54,8 +54,10 @@ The console reads CVAT through `TC_CVAT_URL`; job links use
 - **Inference GPU/batch**: manual Infer uses the GPU list and per-GPU batch
   from the form; auto-infer inherits the training run's settings. With several
   GPUs, jobs are split across GPUs and each GPU uses the same batch.
-- **RF-DETR-2XL**: set `TC_RFDETR_PYTHON` to its env (Python >= 3.10 with
-  `ultralytics` and `rfdetr[train,plus]`). The worker interpreter
+- **RF-DETR-2XL**: training uses PyTorch Lightning DDP across the whole GPU
+  list; the batch from the form is per GPU. Inference also uses the GPU list
+  (jobs are sharded across GPUs). Set `TC_RFDETR_PYTHON` to its env
+  (Python >= 3.10 with `ultralytics` and `rfdetr[train,plus]`). The worker interpreter
   (`TC_WORKER_PYTHON`) must also have `ultralytics` + `rfdetr` for RF-DETR
   inference. Training uses the same YOLO-format dataset (seatbelt excluded by
   `TC_EXCLUDE_FROM_DETECTION`).
@@ -76,10 +78,10 @@ The console reads CVAT through `TC_CVAT_URL`; job links use
 - **GPU** — single id or comma-separated (e.g. `0,1,3`). Training uses
   Ultralytics DDP with 1 process per GPU. The batch you enter is **per GPU**
   (batch 14 on 3 GPUs → 14 on each GPU). The **Test** button next to the GPU
-  field probes free VRAM and suggests the max per-GPU batch (result is cached
-  per weights/imgsz). The probe mirrors real training (AMP FP16) and targets
-  ~90% of free VRAM, so a free 24 GB card suggests ~18/GPU; a GPU shared with
-  SAM2 or another job automatically gets a lower number. Inference uses the
+  field probes free VRAM for YOLO and calibrates the RF-DETR batch from the
+  last RF-DETR run's memory and current free VRAM. The YOLO probe mirrors real
+  training (AMP FP16) and targets ~90% of free VRAM. A shared GPU gets a lower
+  suggestion. Set the Batch field to the Test suggestion before training. Inference uses the
   first GPU of the list.
 
 ## Inference

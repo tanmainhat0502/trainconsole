@@ -282,10 +282,19 @@ async function testGpu() {
     const yoloText = yolo.error
       ? `YOLO26x: <span style="color:var(--danger)">${escapeHtml(yolo.error)}</span>`
       : `YOLO26x: max <b>${yolo.suggested}</b>/GPU (total ${yolo.suggested * data.gpus.length})`;
+    const rfDetail = rf.estimated
+      ? `calibrated${rf.last_batch ? ` from ${rf.last_batch}→${rf.last_mem_gb}GB` : ''}${rf.source ? ` · ${escapeHtml(rf.source)}` : ''}`
+      : (rf.last_batch ? `last run ${rf.last_batch}${rf.source ? ` · ${escapeHtml(rf.source)}` : ''}` : 'auto');
     const rfText = rf.batch
-      ? `RF-DETR-2XL: <b>${rf.batch}</b>/GPU (auto${rf.grad_accum ? `, accum ${rf.grad_accum}` : ''}${rf.source ? ` · ${escapeHtml(rf.source)}` : ''})`
+      ? `RF-DETR-2XL: <b>${rf.batch}</b>/GPU (${rfDetail}${rf.grad_accum ? `, accum ${rf.grad_accum}` : ''})`
       : 'RF-DETR-2XL: auto (no completed run yet)';
     result.innerHTML = `${yoloText} · ${rfText} · free VRAM ${freeStr} · imgsz ${data.imgsz}`;
+    const family = document.getElementById('trainFamily').value;
+    const suggested = family === 'rfdetr' ? rf.batch : yolo.suggested;
+    if (suggested) {
+      document.getElementById('batch').value = suggested;
+      toast(`Batch set to ${suggested}/GPU from GPU Test.`);
+    }
   } catch (error) {
     toast(error.message, 'error');
     result.textContent = error.message;
@@ -305,7 +314,7 @@ function syncFamilyControls() {
   const rfdetr = document.getElementById('trainFamily').value === 'rfdetr';
   document.getElementById('gpuTestBtn').disabled = false;
   document.getElementById('familyHint').textContent = rfdetr
-    ? 'RF-DETR-2XL: training uses batch_size="auto"; this batch is used for inference/compare.'
+    ? 'RF-DETR-2XL: set Batch to the Test suggestion; it is used for training, inference and compare.'
     : 'YOLO26x: batch is per GPU; Test suggests the maximum batch.';
 }
 

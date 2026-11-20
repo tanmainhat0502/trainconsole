@@ -89,10 +89,10 @@ Screenshots from a reference deployment; numbers match the bullets.
 
 1. **KPIs** — completed jobs, new jobs, production model.
 2. **Train form** — model (**YOLO26x** or **RF-DETR-2XL**), Task IDs
-   (empty = all), epochs, batch (**per GPU**; RF-DETR training uses
-   `batch_size="auto"`, the value is used for inference/compare), image size,
-   GPU (single id or `0,1,3`). **Test** shows the YOLO max batch and the last
-   RF-DETR auto batch.
+   (empty = all), epochs, batch (**per GPU**; RF-DETR multi-GPU training uses
+   this batch on every GPU, single-GPU training uses auto), image size,
+   GPU (single id or `0,1,3`). **Test** shows the YOLO max batch and an
+   RF-DETR batch calibrated from the last run plus current free VRAM.
    - **Train & Infer**: train on all completed jobs, then infer new jobs with
      the new weights.
    - **Infer**: inference only, newest weights of the selected family. It uses

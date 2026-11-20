@@ -133,7 +133,8 @@ Login: `admin` / `TC_ADMIN_PASSWORD` (mặc định `admin`).
 1. **Management** → chọn project CVAT.
 2. **+ New batch** → pool, số ảnh, job size, assign user, import COCO.
 3. **Training** → chọn model **YOLO26x** hoặc **RF-DETR-2XL**; **Test** hiển
-   thị batch YOLO và batch RF-DETR (lần train gần nhất). **Compare 50** cho
+   thị batch YOLO và batch RF-DETR đã calibrate theo VRAM trống + lần train
+   gần nhất; nhập batch đó vào ô Batch. **Compare 50** cho
    chọn **View last compare** (kết quả cũ) hoặc **Run new 50 images**; dùng
    GPU/batch trên form, không ghi CVAT.
 3. **Preview sample** → **Create CVAT task/jobs** (đẩy sang CVAT đã có).

@@ -11,6 +11,9 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +55,30 @@ def _metric(metrics: dict[str, Any], name: str) -> float | None:
     return None
 
 
+def _wait_stable(path: Path, timeout: float = 180.0) -> bool:
+    """Wait until DDP rank 0 has finished writing a checkpoint file."""
+
+    deadline = time.time() + timeout
+    last_size = -1
+    stable = 0
+    while time.time() < deadline:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            stable = 0
+            time.sleep(1)
+            continue
+        if size == last_size and size > 0:
+            stable += 1
+            if stable >= 3:
+                return True
+        else:
+            stable = 0
+            last_size = size
+        time.sleep(1)
+    return path.is_file()
+
+
 def _find_best(output: Path) -> Path:
     for name in (
         "checkpoint_best_total.pth",
@@ -88,7 +115,7 @@ def main() -> int:
     parser.add_argument("--epochs", type=int, required=True)
     parser.add_argument("--batch", default="auto")
     parser.add_argument("--resolution", type=int, default=0)
-    parser.add_argument("--gpu", default="0")
+    parser.add_argument("--devices", default="0")
     parser.add_argument("--model", default="RFDETR2XLarge")
     parser.add_argument("--base", default="")
     parser.add_argument("--result", required=True)
@@ -104,23 +131,52 @@ def main() -> int:
 
     import rfdetr
 
+    devices = [value.strip() for value in str(args.devices).split(",") if value.strip()]
+    distributed = len(devices) > 1
+    model_device = "cpu" if distributed else "cuda:0"
+
     cls = getattr(rfdetr, args.model)
-    model = cls(pretrain_weights=args.base) if args.base else cls()
+    if args.base:
+        try:
+            # Checkpoints written by our DDP runs contain custom objects and
+            # must be loaded as trusted local training artifacts.
+            model = rfdetr.RFDETR.from_checkpoint(
+                args.base, trust_checkpoint=True, device=model_device
+            )
+        except Exception:
+            model = cls(pretrain_weights=args.base, device=model_device)
+    else:
+        model = cls(device=model_device)
     names = _dataset_names(data_dir)
+    batch_value: str | int
+    if distributed:
+        try:
+            batch_value = max(1, int(args.batch))
+        except (TypeError, ValueError):
+            batch_value = 4
+    else:
+        batch_value = args.batch if args.batch == "auto" else max(1, int(args.batch))
 
     train_kwargs: dict[str, Any] = {
         "dataset_dir": str(data_dir),
         "dataset_file": "yolo",
         "epochs": max(1, int(args.epochs)),
-        "batch_size": args.batch if args.batch == "auto" else max(1, int(args.batch)),
+        "batch_size": batch_value,
         "output_dir": str(output),
-        "device": "cuda:0",
         "class_names": names,
         "num_workers": 2,
         "run_test": False,
         "tensorboard": False,
         "progress_bar": True,
     }
+    if distributed:
+        # Lightning DDP over the visible devices (CUDA_VISIBLE_DEVICES is set
+        # by train_rfdetr). The batch from the UI is per GPU.
+        train_kwargs["devices"] = ",".join(devices)
+        train_kwargs["strategy"] = "ddp"
+        train_kwargs["grad_accum_steps"] = 1
+    else:
+        train_kwargs["device"] = "cuda:0"
     if args.resolution:
         block = int(model.model_config.patch_size) * int(
             model.model_config.num_windows
@@ -132,7 +188,16 @@ def main() -> int:
     model.train(**train_kwargs)
     _write_status(status_path, args.epochs, args.epochs)
 
+    if distributed:
+        # The parent process can return before rank 0 finishes its final
+        # checkpoint callback. Wait for the best-total file first.
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            if (output / "checkpoint_best_total.pth").is_file():
+                break
+            time.sleep(1)
     best_source = _find_best(output)
+    _wait_stable(best_source)
     weights_dir = output / "weights"
     weights_dir.mkdir(parents=True, exist_ok=True)
     best_path = weights_dir / "best.pth"
@@ -145,13 +210,41 @@ def main() -> int:
 
     metrics: dict[str, Any] = {}
     try:
-        evaluated = rfdetr.RFDETR.from_checkpoint(str(best_path), device="cuda:0")
-        raw = evaluated.evaluate(
-            dataset_dir=str(data_dir),
-            split="val",
-            batch_size=1,
-            device="cuda:0",
-        )
+        if distributed:
+            # Never evaluate from inside the DDP process group; use a clean
+            # single-GPU process so collectives cannot target the wrong device.
+            eval_script = Path(__file__).with_name("rfdetr_eval_cli.py")
+            eval_out = run_dir / "eval_metrics.json"
+            visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
+            eval_env = {**os.environ, "CUDA_VISIBLE_DEVICES": visible}
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(eval_script),
+                    "--checkpoint", str(best_path),
+                    "--data", str(data_dir),
+                    "--out", str(eval_out),
+                ],
+                env=eval_env,
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    (completed.stderr or completed.stdout or "").strip()[-2000:]
+                )
+            raw = json.loads(eval_out.read_text(encoding="utf-8"))
+        else:
+            evaluated = rfdetr.RFDETR.from_checkpoint(
+                str(best_path), device="cuda:0", trust_checkpoint=True
+            )
+            raw = evaluated.evaluate(
+                dataset_dir=str(data_dir),
+                split="val",
+                batch_size=1,
+                device="cuda:0",
+            )
         map50 = _metric(raw, "mAP_50")
         map50_95 = _metric(raw, "mAP_50_95")
         if map50 is not None:
@@ -165,13 +258,16 @@ def main() -> int:
         print(f"RF-DETR evaluate failed: {type(exc).__name__}: {exc}", flush=True)
 
     # Keep only the production checkpoint; the worker prunes older runs.
-    _prune_checkpoints(output, best_path)
+    # In DDP the rank-0 callback may still be finalizing checkpoint files, so
+    # leave cleanup to the worker after the process exits.
+    if not distributed:
+        _prune_checkpoints(output, best_path)
 
     payload = {
         "weights": str(best_path),
         "base_model": args.base or args.model,
         "metrics": metrics,
-        "gpu": str(args.gpu),
+        "gpu": str(args.devices),
     }
     Path(args.result).write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(json.dumps(payload), flush=True)

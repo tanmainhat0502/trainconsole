@@ -235,11 +235,14 @@ def process_train(database: Database) -> int | None:
             )
         else:
             assert rfdetr_dataset is not None
+            rfdetr_batch: str | int = max(
+                1, int(config.get("batch", settings.yolo_batch))
+            )
             result = train_rfdetr(
                 rfdetr_dataset,
                 run_dir,
                 epochs=int(config.get("epochs", settings.epochs)),
-                batch="auto",
+                batch=rfdetr_batch,
                 resolution=int(config.get("imgsz") or settings.rfdetr_resolution),
                 gpu=train_gpu,
                 base_model=base,

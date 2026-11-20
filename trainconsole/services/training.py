@@ -243,6 +243,23 @@ def prune_old_weights(artifact_root: Path, keep_paths: set[Path]) -> tuple[int, 
                 continue
             removed += 1
             freed += size
+    # DDP trainers leave checkpoint_best_*.pth / last.ckpt directly under
+    # train/; the production copy lives in train/weights/best.pth.
+    for pattern in ("*.pth", "*.ckpt"):
+        for path in root.glob(f"*/train/{pattern}"):
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if resolved in keep or root not in resolved.parents:
+                continue
+            try:
+                size = path.stat().st_size
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+            freed += size
     return removed, freed
 
 
@@ -323,7 +340,9 @@ def train_rfdetr(
     status_file = run_dir / "progress.json"
     log_path = run_dir / "train.log"
     status_file.unlink(missing_ok=True)
-    first_gpu = str(gpu or settings.gpu).split(",")[0].strip() or "0"
+    gpus = [part.strip() for part in str(gpu or settings.gpu).split(",") if part.strip()]
+    if not gpus:
+        gpus = ["0"]
     script = Path(__file__).resolve().parents[1] / "rfdetr_cli.py"
     command = [
         settings.rfdetr_python,
@@ -333,7 +352,7 @@ def train_rfdetr(
         "--epochs", str(max(1, int(epochs))),
         "--batch", str(batch),
         "--resolution", str(max(64, int(resolution))),
-        "--gpu", "0",
+        "--devices", ",".join(str(index) for index in range(len(gpus))),
         "--model", settings.rfdetr_model,
         "--result", str(result_file),
         "--status", str(status_file),
@@ -341,9 +360,13 @@ def train_rfdetr(
     if base_model:
         command += ["--base", str(base_model)]
     if progress:
-        progress(45, f"{settings.rfdetr_model} · GPU {first_gpu}")
+        progress(45, f"{settings.rfdetr_model} · GPU {','.join(gpus)}")
     last_status: tuple[int, int] | None = None
-    env = {**os.environ, "PYTHONUNBUFFERED": "1", "CUDA_VISIBLE_DEVICES": first_gpu}
+    env = {
+        **os.environ,
+        "PYTHONUNBUFFERED": "1",
+        "CUDA_VISIBLE_DEVICES": ",".join(gpus),
+    }
     with open(log_path, "a", encoding="utf-8") as log:
         log.write(" ".join(command) + "\n")
         log.flush()
@@ -402,7 +425,7 @@ def train_rfdetr(
         "weights": payload["weights"],
         "metrics": payload.get("metrics") or {},
         "base_model": payload.get("base_model") or settings.rfdetr_model,
-        "gpu": first_gpu,
+        "gpu": ",".join(gpus),
         "env": "rfdetr",
     }
 

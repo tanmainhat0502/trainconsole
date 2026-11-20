@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import secrets
 import shutil
 import signal
@@ -983,13 +984,8 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
             for run in runs:
                 if str((run.config or {}).get("family") or "yolo26") != "rfdetr":
                     continue
-                cfg_path = (
-                    settings.artifact_root
-                    / "train_runs"
-                    / str(run.id)
-                    / "train"
-                    / "training_config.json"
-                )
+                run_dir = settings.artifact_root / "train_runs" / str(run.id)
+                cfg_path = run_dir / "train" / "training_config.json"
                 if not cfg_path.is_file():
                     continue
                 try:
@@ -998,10 +994,33 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
                     )
                 except Exception:
                     continue
+                last_batch = int(train_cfg.get("batch_size") or 0)
+                max_mem = 0.0
+                log_path = run_dir / "train.log"
+                if log_path.is_file():
+                    try:
+                        text = log_path.read_text(encoding="utf-8", errors="replace")
+                        for value in re.findall(r"max_mem=([0-9.]+) GB", text):
+                            max_mem = max(max_mem, float(value))
+                    except OSError:
+                        pass
+                # max_mem is PyTorch-allocated; add CUDA context/cuDNN/fragmentation
+                observed_gb = (max_mem + 3.0) if max_mem else None
+                suggested = last_batch
+                estimated = False
+                if last_batch > 0 and observed_gb:
+                    per_batch = observed_gb / last_batch
+                    min_free_gb = min(free[g] / 1024**3 for g in gpus)
+                    if per_batch > 0:
+                        suggested = max(1, int((0.9 * min_free_gb) / per_batch))
+                        estimated = True
                 rfdetr_result = {
-                    "batch": train_cfg.get("batch_size"),
+                    "batch": suggested,
+                    "last_batch": last_batch or None,
+                    "last_mem_gb": round(observed_gb, 1) if observed_gb else None,
                     "grad_accum": train_cfg.get("grad_accum_steps"),
                     "source": f"run {run.id}",
+                    "estimated": estimated,
                 }
                 break
 

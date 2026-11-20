@@ -179,7 +179,9 @@ def _process_chunk(
 
     from rfdetr import RFDETR
 
-    detr = RFDETR.from_checkpoint(args.detr, device=f"cuda:{gpu}")
+    detr = RFDETR.from_checkpoint(
+        args.detr, device=f"cuda:{gpu}", trust_checkpoint=True
+    )
     output: list[tuple[int, dict[str, Any]]] = []
     batch_size = max(1, int(args.batch))
     for offset in range(0, len(chunk), batch_size):

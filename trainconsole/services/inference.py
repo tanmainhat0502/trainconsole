@@ -118,7 +118,9 @@ def run_inference(
         from rfdetr import RFDETR
 
         device = f"cuda:{gpu}" if str(gpu).isdigit() else "cuda:0"
-        model = RFDETR.from_checkpoint(model_path, device=device)
+        model = RFDETR.from_checkpoint(
+            model_path, device=device, trust_checkpoint=True
+        )
         class_names = list(getattr(model, "class_names", None) or names)
     else:
         from ultralytics import YOLO
