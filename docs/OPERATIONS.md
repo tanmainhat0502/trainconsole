@@ -36,9 +36,9 @@ The console reads CVAT through `TC_CVAT_URL`; job links use
 ## Training
 
 - **Model**: choose **YOLO26x** or **RF-DETR-2XL** in the train form (and in
-  the Infer dialog). YOLO uses per-GPU batch; RF-DETR uses `batch_size="auto"`.
-- **Train & Infer**: trains on all `completed` jobs of the project, then queues
-  inference for `new` jobs with the new weights. Job exports are cached in
+  the Infer dialog). YOLO uses per-GPU batch; RF-DETR uses the Batch field.
+- **Train**: trains on all `completed` jobs of the project only. Use **Infer**
+  separately for `new` jobs. Job exports are cached in
   `var/trainconsole/job_cache` and reused while the job's CVAT `updated_date`
   is unchanged, so a later train only exports new or re-annotated jobs.
   Delete that folder to force a full re-export (`TC_EXPORT_CACHE=0` disables

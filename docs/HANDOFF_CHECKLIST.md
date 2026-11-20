@@ -110,7 +110,7 @@ Login: `admin` / `TC_ADMIN_PASSWORD`.
 2. **+ New batch** → pool, số ảnh, job size, assign user, import COCO.
 3. Preview → Create CVAT task/jobs.
 4. User label/review trong CVAT có sẵn.
-5. Training → **Train & Infer**.
+5. Training → **Train** (chỉ train); **Infer** là nút riêng.
 6. Theo dõi tiến độ, Cancel nếu cần.
 7. Export labels nếu cần COCO.
 

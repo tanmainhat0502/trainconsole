@@ -139,7 +139,7 @@ Login: `admin` / `TC_ADMIN_PASSWORD` (mặc định `admin`).
    GPU/batch trên form, không ghi CVAT.
 3. **Preview sample** → **Create CVAT task/jobs** (đẩy sang CVAT đã có).
 4. User label/review trong CVAT.
-5. **Training** → **Train & Infer**.
+5. **Training** → **Train** (chỉ train); **Infer** là nút riêng.
 6. Theo dõi tiến độ từng epoch, **Cancel** nếu cần.
 7. **Export labels** để tải COCO JSON.
 8. Quản lý user trong **Manage users** (tạo/xoá, xem password).

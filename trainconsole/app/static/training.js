@@ -138,12 +138,12 @@ async function startTraining() {
         family: document.getElementById('trainFamily').value,
       }),
     });
-    toast(`Queued train + infer (run #${run.id}).`);
+    toast(`Queued training run #${run.id}.`);
     await loadRuns();
   } catch (error) {
     toast(error.message, 'error');
   } finally {
-    button.disabled = false; button.textContent = 'Train & Infer';
+    button.disabled = false; button.textContent = 'Train';
   }
 }
 

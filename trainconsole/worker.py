@@ -89,31 +89,6 @@ def _model_keep_paths(database: Database) -> set[Path]:
     }
 
 
-def _queue_inference(
-    database: Database,
-    *,
-    project_id: int,
-    task_ids: list[int],
-    model_id: int,
-    gpu: str,
-    batch: int,
-) -> int:
-    with database.session() as db:
-        run = InferRun(
-            name=f"auto-infer-model-{model_id}",
-            cvat_project_id=project_id,
-            task_ids=task_ids,
-            gpu=gpu,
-            batch=batch,
-            model_id=model_id,
-            state="queued",
-            stage="waiting for new jobs",
-        )
-        db.add(run)
-        db.flush()
-        return run.id
-
-
 def _reclaim_stale_runs(database: Database) -> None:
     """Requeue runs left ``running`` by a worker that died mid-job.
 
@@ -284,7 +259,6 @@ def process_train(database: Database) -> int | None:
             run.metrics = {"classes": dataset, **result["metrics"]}
             run.completed_at = _now()
             db.flush()
-            model_id = model.id
         if settings.prune_old_weights:
             try:
                 keep_paths = _model_keep_paths(database)
@@ -300,28 +274,6 @@ def process_train(database: Database) -> int | None:
                     f"checkpoint cleanup failed: {type(exc).__name__}: {exc}",
                     flush=True,
                 )
-        per_gpu_batch = max(1, int(config.get("batch", settings.yolo_batch)))
-        if family == "rfdetr":
-            try:
-                training_cfg = json.loads(
-                    (run_dir / "train" / "training_config.json").read_text(
-                        encoding="utf-8"
-                    )
-                ).get("train_config", {})
-                per_gpu_batch = max(
-                    1, int(training_cfg.get("batch_size") or per_gpu_batch)
-                )
-            except Exception:
-                pass
-        infer_id = _queue_inference(
-            database,
-            project_id=project_id,
-            task_ids=task_ids,
-            model_id=model_id,
-            gpu=train_gpu,
-            batch=per_gpu_batch,
-        )
-        _set_train(database, run_id, stage=f"completed; inference #{infer_id} queued")
         return run_id
     except TrainingCancelled:
         _set_train(

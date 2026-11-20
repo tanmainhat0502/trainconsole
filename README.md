@@ -93,8 +93,8 @@ Screenshots from a reference deployment; numbers match the bullets.
    this batch on every GPU, single-GPU training uses auto), image size,
    GPU (single id or `0,1,3`). **Test** shows the YOLO max batch and an
    RF-DETR batch calibrated from the last run plus current free VRAM.
-   - **Train & Infer**: train on all completed jobs, then infer new jobs with
-     the new weights.
+   - **Train**: train on all completed jobs only. Use **Infer** separately to
+     update `new` jobs.
    - **Infer**: inference only, newest weights of the selected family. It uses
      the GPU list and batch from the form. Opens a dialog with two modes:
      **all new jobs** (respects Task IDs above) or **specific job IDs**
@@ -209,7 +209,7 @@ Login with `TC_ADMIN_USERNAME` / `TC_ADMIN_PASSWORD` (default `admin`/`admin`).
 - **Management** (`/management`): project switcher, pool/CVAT/labeled KPIs,
   batch creation (diversity sampler or *Force all images*), assignee search,
   CVAT account creation/deletion with stored passwords, per-user progress.
-- **Training** (`/training`): one **Train & Infer** button, separate **Infer**,
+- **Training** (`/training`): one **Train** button, separate **Infer**,
   **Export labels** (COCO: completed/all), 5 latest runs, per-epoch progress,
   cancel button. Exports are cached per job, so retraining only downloads
   newly completed or re-annotated jobs. After a successful run, only the
