@@ -127,8 +127,7 @@ def selection_preview(
     if not samples:
         raise ValueError("no images left in the pool (all uploaded or empty)")
 
-    use_all = take_all or budget >= len(samples)
-    if use_all:
+    if take_all:
         ordered = _balanced_order(samples)
         report = {
             "budget": budget,
@@ -140,6 +139,31 @@ def selection_preview(
                 (_counts(ordered, "group").values()), default=0
             ),
             "strategy": "all-balanced",
+        }
+        items = [
+            {
+                "sample_key": sample.key,
+                "path": sample.path,
+                "absolute_path": str(root / sample.path),
+                "source": sample.source,
+                "group": sample.group,
+                "reason": "all",
+                "score": 1.0,
+            }
+            for sample in ordered
+        ]
+    elif budget >= len(samples):
+        ordered = sorted(samples, key=lambda sample: sample.path)
+        report = {
+            "budget": budget,
+            "selected": len(ordered),
+            "per_source": _counts(ordered, "source"),
+            "per_reason": {"all": len(ordered)},
+            "groups_used": len({sample.group for sample in ordered}),
+            "max_per_group": max(
+                (_counts(ordered, "group").values()), default=0
+            ),
+            "strategy": "all-original",
         }
         items = [
             {
@@ -184,6 +208,7 @@ def selection_preview(
             }
             for item in selections
         ]
+        items.sort(key=lambda item: item["path"])
     preview_id = hashlib.sha256(
         json.dumps(
             {

@@ -64,10 +64,11 @@ Screenshots from a reference deployment; numbers match the bullets.
 2. **Task name / Pool root** — task name in CVAT and the image folder.
 3. **Images / Seed** — number of images to take and the deterministic seed.
 4. **Job size / Assign users** — frames per CVAT job and round-robin users.
-5. **Force all images** — take every remaining image and order them round-robin
-   by source, so each job covers many clips. Unchecked + fewer images than the
-   pool runs the diversity sampler (KMeans medoid, 10% audit, max 12 per clip,
-   min frame gap 10, near-duplicate removal).
+5. **Force all images** (default tick) — take every remaining image and order
+   them round-robin by source, so each job covers many clips. Untick to use
+   `Images` + the diversity sampler (KMeans medoid, 10% audit, max 12 per clip,
+   min frame gap 10, near-duplicate removal); selected images keep the original
+   pool path order.
    **Import existing COCO labels** imports boxes by `file_name` with no scaling.
 6. **Preview sample → Create CVAT task/jobs** — preview the selection, then
    upload to the existing CVAT.

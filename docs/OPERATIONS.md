@@ -20,10 +20,11 @@ The console reads CVAT through `TC_CVAT_URL`; job links use
 - **KPIs**: images in pool, on CVAT, labeled, unlabeled, not on CVAT.
 - **+ New batch**:
   - pool root from the selected project config;
-  - *Force all images* takes all remaining images, ordered round-robin by
-    source, so each job covers many clips;
-  - unchecked + `Images < pool size` runs the diversity sampler (KMeans medoid,
-    10% audit, max 12/clip, min frame gap 10, near-duplicate removal);
+  - *Force all images* (default tick) takes all remaining images, ordered
+    round-robin by source, so each job covers many clips;
+  - untick to use the `Images` budget + diversity sampler (KMeans medoid, 10%
+    audit, max 12/clip, min frame gap 10, near-duplicate removal); selected
+    images keep the original pool path order, no shuffle;
   - *Import existing COCO labels* imports boxes by `file_name`, no scaling.
 - **Assignee**: type the first letters to search a user; selection saves
   directly to CVAT.
