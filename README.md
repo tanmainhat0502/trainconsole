@@ -203,7 +203,7 @@ See `docs/DATA_FORMAT.md`. For agent-based formatting, use
 ./deploy/tc_worker.sh     # keep running (crash-safe supervisor)
 ```
 
-Login with `TC_ADMIN_USERNAME` / `TC_ADMIN_PASSWORD` (default `admin`/`admin`).
+Login with `TC_ADMIN_USERNAME` / `TC_ADMIN_PASSWORD`.
 
 ## Features
 
